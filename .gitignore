@@ -1,3 +1,11 @@
 node_modules/
 scratch*/
 sentry
+logs/
+*.log
+*.pid
+*.tmp
+src/server/**/*.js
+src/server/**/*.js.map
+src/server/**/*.d.ts
+src/server/**/*.d.ts.map

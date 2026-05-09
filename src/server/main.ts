@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,10 @@ import { glob } from "glob";
 type ServerOptions = {
   host: string;
   port: number;
+};
+
+type LoginBody = {
+  password?: string;
 };
 
 type RendererToMainMessage =
@@ -184,6 +188,118 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function parseCookies(cookieHeader: string | undefined): Map<string, string> {
+  const cookies = new Map<string, string>();
+  for (const part of cookieHeader?.split(";") ?? []) {
+    const [rawName, ...rawValueParts] = part.split("=");
+    const name = rawName?.trim();
+    if (!name) {
+      continue;
+    }
+    cookies.set(name, decodeURIComponent(rawValueParts.join("=")));
+  }
+  return cookies;
+}
+
+function authTokenForPassword(password: string): string {
+  return createHash("sha256")
+    .update(`codex-web-auth:${password}`)
+    .digest("hex");
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isAuthenticated(
+  cookieHeader: string | undefined,
+  expectedToken: string | null,
+): boolean {
+  if (!expectedToken) {
+    return true;
+  }
+  const token = parseCookies(cookieHeader).get("codex_web_auth");
+  return token ? constantTimeEqual(token, expectedToken) : false;
+}
+
+function loginPage(message = ""): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Web Login</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111;
+        color: #f7f7f7;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(360px, calc(100vw - 32px));
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 0 0 18px;
+      }
+      form {
+        display: grid;
+        gap: 12px;
+      }
+      input,
+      button {
+        box-sizing: border-box;
+        width: 100%;
+        border-radius: 6px;
+        font: inherit;
+      }
+      input {
+        border: 1px solid #444;
+        background: #181818;
+        color: inherit;
+        padding: 11px 12px;
+      }
+      button {
+        border: 0;
+        background: #f7f7f7;
+        color: #111;
+        cursor: pointer;
+        padding: 11px 12px;
+        font-weight: 600;
+      }
+      p {
+        min-height: 20px;
+        margin: 10px 0 0;
+        color: #ffb4a8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Codex Web</h1>
+      <form method="post" action="/__auth/login">
+        <input name="password" type="password" autocomplete="current-password" placeholder="Password" autofocus />
+        <button type="submit">Sign in</button>
+      </form>
+      <p>${message}</p>
+    </main>
+  </body>
+</html>`;
+}
+
 async function getWorkspaceDirectoryEntries({
   directoryPath,
   directoriesOnly,
@@ -255,6 +371,24 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const app = Fastify({ logger: false });
   const websocketServer = new WebSocketServer({ noServer: true });
   const sockets = new Set<WebSocket>();
+  const configuredPassword = process.env.CODEX_WEB_PASSWORD?.trim() || null;
+  const expectedAuthToken = configuredPassword
+    ? authTokenForPassword(configuredPassword)
+    : null;
+
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_request, body, done) => {
+      done(null, Object.fromEntries(new URLSearchParams(body as string)));
+    },
+  );
+
+  app.addHook("onResponse", async (request, reply) => {
+    console.log(
+      `[http] ${request.method} ${request.url} ${reply.statusCode}`,
+    );
+  });
 
   await app.register(fastifyMultipart, {
     limits: {
@@ -265,6 +399,42 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const uploadRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "codex-web-uploads-"),
   );
+
+  app.get("/__auth/login", async (_request, reply) => {
+    return reply.type("text/html").send(loginPage());
+  });
+
+  app.post<{ Body: LoginBody }>("/__auth/login", async (request, reply) => {
+    const password = request.body?.password ?? "";
+    if (
+      !expectedAuthToken ||
+      constantTimeEqual(authTokenForPassword(password), expectedAuthToken)
+    ) {
+      reply.header(
+        "Set-Cookie",
+        `codex_web_auth=${encodeURIComponent(expectedAuthToken ?? "disabled")}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`,
+      );
+      return reply.redirect("/");
+    }
+
+    return reply.code(401).type("text/html").send(loginPage("Invalid password"));
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (!expectedAuthToken || request.url.startsWith("/__auth/login")) {
+      return;
+    }
+
+    if (isAuthenticated(request.headers.cookie, expectedAuthToken)) {
+      return;
+    }
+
+    if (request.method === "GET") {
+      return reply.redirect("/__auth/login");
+    }
+
+    return reply.code(401).send({ error: "Unauthorized" });
+  });
 
   app.post("/__backend/upload", async (request, reply) => {
     if (!request.isMultipart()) {
@@ -322,11 +492,16 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
-    if (url.pathname !== "/__backend/ipc") {
+    if (
+      url.pathname !== "/__backend/ipc" ||
+      !isAuthenticated(request.headers.cookie, expectedAuthToken)
+    ) {
+      console.log(`[ws] rejected ${url.pathname}`);
       socket.destroy();
       return;
     }
 
+    console.log(`[ws] accepted ${url.pathname}`);
     websocketServer.handleUpgrade(request, socket, head, (upgradedSocket) => {
       websocketServer.emit("connection", upgradedSocket, request);
     });
