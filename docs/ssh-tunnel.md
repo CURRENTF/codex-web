@@ -20,6 +20,42 @@ Keep it bound to loopback. The SSH tunnel is the access layer.
 Use the same SSH host, user, port, and identity file that you normally use to
 log into this machine.
 
+Preferred local wrapper:
+
+```bash
+codex-web-tunnel start -p <SSH_PORT> root@<SSH_HOST>
+codex-web-tunnel status
+codex-web-tunnel open
+```
+
+The wrapper starts both pieces needed on the Mac:
+
+- the raw SSH tunnel on `127.0.0.1:16006`
+- the cached local proxy on `127.0.0.1:6006`
+
+The browser URL stays:
+
+```text
+http://127.0.0.1:6006
+```
+
+For a different server, pass that server's SSH endpoint:
+
+```bash
+codex-web-tunnel restart -p 12345 root@example.com
+```
+
+For multiple servers at the same time, give each one separate local ports:
+
+```bash
+codex-web-tunnel start \
+  --local-web-port 6007 \
+  --local-tunnel-port 16007 \
+  -p 12345 root@example.com
+```
+
+Manual tunnel without the local cache:
+
 ```bash
 ssh -N \
   -L 6006:127.0.0.1:6006 \
@@ -38,7 +74,8 @@ http://127.0.0.1:6006
 ## Cached Local Proxy
 
 For slow links, keep the browser URL on local port `6006`, but move the raw SSH
-tunnel to `16006` and put a local asset-caching proxy on `6006`:
+tunnel to `16006` and put a local asset-caching proxy on `6006`. The
+`codex-web-tunnel` wrapper starts both automatically. Manual equivalent:
 
 ```bash
 ssh -fN \
@@ -53,9 +90,9 @@ CODEX_WEB_PROXY_PORT=6006 \
 npm run cached-tunnel-proxy
 ```
 
-Static `/assets/*` responses are cached under `.cache/codex-web-assets` on the
-Mac. HTTP routes, login, and the IPC WebSocket are still forwarded to the remote
-server through the SSH tunnel. This keeps normal browser access at:
+Static `/assets/*` responses are cached under `~/.cache/codex-web/assets` on
+the Mac. HTTP routes, login, and the IPC WebSocket are still forwarded to the
+remote server through the SSH tunnel. This keeps normal browser access at:
 
 ```text
 http://127.0.0.1:6006
@@ -81,18 +118,16 @@ ssh -fN \
 If local port `6006` is already in use, map another local port:
 
 ```bash
-ssh -N \
-  -L 16006:127.0.0.1:6006 \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
+codex-web-tunnel start \
+  --local-web-port 6007 \
+  --local-tunnel-port 16007 \
   -p <SSH_PORT> root@<SSH_HOST>
 ```
 
 Then open:
 
 ```text
-http://127.0.0.1:16006
+http://127.0.0.1:6007
 ```
 
 ## Background Mode
@@ -105,6 +140,12 @@ ssh -fN -L 6006:127.0.0.1:6006 -p <SSH_PORT> root@<SSH_HOST>
 ```
 
 Stop it on the Mac with:
+
+```bash
+codex-web-tunnel stop
+```
+
+Manual cleanup:
 
 ```bash
 pkill -f 'ssh.*6006:127.0.0.1:6006'
