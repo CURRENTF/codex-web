@@ -346,7 +346,7 @@ function stripModulePreloadLinks(html: string): string {
 
 function addBrowserAssetCacheBusters(html: string): string {
   return html.replace(
-    /(<script\b[^>]*\bsrc=["']\.\/assets\/(?:preload|index-[^"']+)\.js)(["'])/gi,
+    /(<script\b[^>]*\bsrc=["']\.\/assets\/(?:preload|index-[^"']+|app-main-[^"']+)\.js)(["'])/gi,
     `$1?v=${browserAssetVersion}$2`,
   );
 }
@@ -357,7 +357,7 @@ function disableBlockingStatsigInit(source: string): string {
   }
 
   const statsigInitPattern =
-    /(\s*)let \{ client: ([\w$]+), isLoading: ([\w$]+) \} = \(0, ([\w$]+)\.useClientAsyncInit\)\(([^;]+?)\),\n\s*([\w$]+),\n\s*([\w$]+);/;
+    /(\s*)let \{ client: ([\w$]+), isLoading: ([\w$]+) \} = \(0, ([\w$]+)\.useClientAsyncInit\)\(([^;]+?)\),\n\s*([\w$]+(?:\s*=\s*![\w$]+)?),\n\s*([\w$]+);/;
   const patched = source.replace(
     statsigInitPattern,
     (
@@ -386,7 +386,7 @@ function disableBlockingStatsigInit(source: string): string {
 
 function disableBlockingAccountInfoInit(source: string): string {
   const accountInfoGate =
-    /if \(r\.isLoading \|\| a \|\| s \|\| \(m && g\) \|\| \(m && f && !p\)\) \{/;
+    /if \(r\.isLoading \|\| a \|\| s \|\| \(([\w$]+) && ([\w$]+)\) \|\| \(\1 && ([\w$]+) && !([\w$]+)\)\) \{/;
   const patched = source.replace(
     accountInfoGate,
     "if (r.isLoading || a || s) {",
@@ -431,13 +431,14 @@ async function getWebviewIndexHtml(webviewRoot: string): Promise<string> {
 async function sendPatchedMainAsset(
   reply: FastifyReply,
   webviewRoot: string,
+  prefix: "app-main" | "index",
   hash: string,
 ): Promise<FastifyReply> {
   if (!/^[A-Za-z0-9_-]+$/.test(hash)) {
     return reply.code(404).send({ error: "Not Found" });
   }
 
-  const assetPath = path.join(webviewRoot, "assets", `index-${hash}.js`);
+  const assetPath = path.join(webviewRoot, "assets", `${prefix}-${hash}.js`);
   return reply
     .header("Content-Type", "text/javascript; charset=utf-8")
     .header("Cache-Control", "no-cache")
@@ -648,7 +649,24 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   app.get<{ Params: MainAssetParams }>(
     "/assets/index-:hash.js",
     async (request, reply) => {
-      return sendPatchedMainAsset(reply, webviewRoot, request.params.hash);
+      return sendPatchedMainAsset(
+        reply,
+        webviewRoot,
+        "index",
+        request.params.hash,
+      );
+    },
+  );
+
+  app.get<{ Params: MainAssetParams }>(
+    "/assets/app-main-:hash.js",
+    async (request, reply) => {
+      return sendPatchedMainAsset(
+        reply,
+        webviewRoot,
+        "app-main",
+        request.params.hash,
+      );
     },
   );
 
