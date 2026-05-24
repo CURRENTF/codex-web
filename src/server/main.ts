@@ -351,9 +351,32 @@ function addBrowserAssetCacheBusters(html: string): string {
   );
 }
 
+function redirectStatsigNetworkToLocalBootstrap(source: string): {
+  source: string;
+  redirected: boolean;
+} {
+  const localBootstrapResponse = [
+    "networkOverrideFunc: async () => new Response(",
+    "JSON.stringify({ has_updates: true, time: Date.now(), feature_gates: {}, dynamic_configs: {}, layer_configs: {}, param_stores: {}, sdkInfo: {} }),",
+    '{ status: 200, headers: { "content-type": "application/json" } },',
+    "),",
+  ].join(" ");
+  const patched = source.replace(
+    /networkOverrideFunc:\s*[\w$]+,/,
+    localBootstrapResponse,
+  );
+
+  return { source: patched, redirected: patched !== source };
+}
+
 function disableBlockingStatsigInit(source: string): string {
   if (process.env.CODEX_WEB_WAIT_FOR_STATSIG === "1") {
     return source;
+  }
+
+  const networkRedirect = redirectStatsigNetworkToLocalBootstrap(source);
+  if (networkRedirect.redirected) {
+    return networkRedirect.source;
   }
 
   const statsigInitPattern =
