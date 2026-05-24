@@ -24,9 +24,15 @@ Preferred local wrapper:
 
 ```bash
 codex-web-tunnel start -p <SSH_PORT> root@<SSH_HOST>
+codex-web-tunnel ssh -p <SSH_PORT> root@<SSH_HOST>
+codex-web-tunnel -p <SSH_PORT> root@<SSH_HOST>
 codex-web-tunnel status
 codex-web-tunnel open
 ```
+
+The second and third forms are convenience aliases: they let you paste the SSH
+connection command you normally use, with the leading `ssh` accepted and ignored
+by the wrapper.
 
 The wrapper starts both pieces needed on the Mac:
 

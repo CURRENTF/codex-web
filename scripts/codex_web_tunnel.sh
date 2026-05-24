@@ -17,7 +17,7 @@ WEB_URL="http://127.0.0.1:${LOCAL_WEB_PORT}"
 
 usage() {
   cat <<EOF
-Usage: codex-web-tunnel <command> [ssh options] [user@host]
+Usage: codex-web-tunnel [command] [ssh options] [user@host]
 
 Commands:
   start     Start the SSH tunnel and local cached proxy
@@ -36,7 +36,9 @@ Environment overrides:
 
 Examples:
   codex-web-tunnel start
+  codex-web-tunnel ssh -p 22160 root@connect.westb.seetacloud.com
   codex-web-tunnel start -p 22160 root@connect.westb.seetacloud.com
+  codex-web-tunnel -p 22160 root@connect.westb.seetacloud.com
   codex-web-tunnel open -p 12345 root@example.com
 EOF
 }
@@ -271,9 +273,22 @@ tail_logs() {
 }
 
 command="${1:-status}"
-if [[ "$#" -gt 0 ]]; then
-  shift
-fi
+case "$command" in
+  start | stop | restart | status | open | logs | help | -h | --help)
+    if [[ "$#" -gt 0 ]]; then
+      shift
+    fi
+    ;;
+  ssh)
+    command="start"
+    shift
+    ;;
+  *)
+    if [[ "$#" -gt 0 ]]; then
+      command="start"
+    fi
+    ;;
+esac
 parse_connection_args "$@"
 
 case "$command" in
