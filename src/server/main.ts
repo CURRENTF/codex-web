@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs as parseCliArgs } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
+import fastifyCompress from "@fastify/compress";
 import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
@@ -17,8 +18,14 @@ type ServerOptions = {
   port: number;
 };
 
+type ConsoleMethod = "debug" | "info" | "log";
+
 type LoginBody = {
   password?: string;
+};
+
+type MainAssetParams = {
+  hash: string;
 };
 
 type RendererToMainMessage =
@@ -116,6 +123,10 @@ type IpcMainBridgeState = {
   handleRendererSend?: (channel: string, args: unknown[]) => void;
 };
 
+let cachedWebviewIndexHtml: string | null = null;
+const browserAssetCache = new Map<string, string>();
+const browserAssetVersion = Date.now().toString(36);
+
 function printUsage(): void {
   console.log(
     [
@@ -131,6 +142,32 @@ function printUsage(): void {
       "  yarn server --port 9000",
     ].join("\n"),
   );
+}
+
+function shouldSuppressAppLog(args: unknown[]): boolean {
+  if (process.env.CODEX_WEB_VERBOSE_APP_LOG === "1") {
+    return false;
+  }
+
+  const [first] = args;
+  return (
+    typeof first === "string" &&
+    (first.startsWith("[electron-fetch-wrapper] Fetch body=") ||
+      first.startsWith("[electron-fetch-wrapper] Fetch-stream"))
+  );
+}
+
+function installConsoleLogFilters(): void {
+  const methods: ConsoleMethod[] = ["debug", "info", "log"];
+  for (const method of methods) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      if (shouldSuppressAppLog(args)) {
+        return;
+      }
+      original(...args);
+    };
+  }
 }
 
 function parsePort(raw: string): number {
@@ -300,6 +337,123 @@ function loginPage(message = ""): string {
 </html>`;
 }
 
+function stripModulePreloadLinks(html: string): string {
+  return html.replace(
+    /\s*<link\b(?=[^>]*\brel=["']modulepreload["'])[^>]*>\s*/gi,
+    "\n",
+  );
+}
+
+function addBrowserAssetCacheBusters(html: string): string {
+  return html.replace(
+    /(<script\b[^>]*\bsrc=["']\.\/assets\/(?:preload|index-[^"']+)\.js)(["'])/gi,
+    `$1?v=${browserAssetVersion}$2`,
+  );
+}
+
+function disableBlockingStatsigInit(source: string): string {
+  if (process.env.CODEX_WEB_WAIT_FOR_STATSIG === "1") {
+    return source;
+  }
+
+  const statsigInitPattern =
+    /(\s*)let \{ client: ([\w$]+), isLoading: ([\w$]+) \} = \(0, ([\w$]+)\.useClientAsyncInit\)\(([^;]+?)\),\n\s*([\w$]+),\n\s*([\w$]+);/;
+  const patched = source.replace(
+    statsigInitPattern,
+    (
+      _match,
+      indent: string,
+      clientName: string,
+      loadingName: string,
+      namespaceName: string,
+      args: string,
+      firstDeclaration: string,
+      secondDeclaration: string,
+    ) =>
+      `${indent}let { client: ${clientName}, isLoading: ${loadingName} } = (0, ${namespaceName}.useClientAsyncInit)(${args});\n` +
+      `${indent}${loadingName} = false;\n` +
+      `${indent}let ${firstDeclaration},\n` +
+      `${indent}  ${secondDeclaration};`,
+  );
+
+  if (patched === source) {
+    console.warn(
+      "[browser-patch] Statsig async init gate was not found in the main asset",
+    );
+  }
+  return patched;
+}
+
+function disableBlockingAccountInfoInit(source: string): string {
+  const accountInfoGate =
+    /if \(r\.isLoading \|\| a \|\| s \|\| \(m && g\) \|\| \(m && f && !p\)\) \{/;
+  const patched = source.replace(
+    accountInfoGate,
+    "if (r.isLoading || a || s) {",
+  );
+
+  if (patched === source) {
+    console.warn(
+      "[browser-patch] account-info loading gate was not found in the main asset",
+    );
+  }
+  return patched;
+}
+
+async function getPatchedMainAsset(assetPath: string): Promise<string> {
+  const cached = browserAssetCache.get(assetPath);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const source = await fs.readFile(assetPath, "utf8");
+  const patched = disableBlockingAccountInfoInit(
+    disableBlockingStatsigInit(source),
+  );
+  browserAssetCache.set(assetPath, patched);
+  return patched;
+}
+
+async function getWebviewIndexHtml(webviewRoot: string): Promise<string> {
+  if (cachedWebviewIndexHtml !== null) {
+    return cachedWebviewIndexHtml;
+  }
+
+  const html = await fs.readFile(path.join(webviewRoot, "index.html"), "utf8");
+  const preprocessedHtml =
+    process.env.CODEX_WEB_MODULEPRELOAD === "1"
+      ? html
+      : stripModulePreloadLinks(html);
+  cachedWebviewIndexHtml = addBrowserAssetCacheBusters(preprocessedHtml);
+  return cachedWebviewIndexHtml;
+}
+
+async function sendPatchedMainAsset(
+  reply: FastifyReply,
+  webviewRoot: string,
+  hash: string,
+): Promise<FastifyReply> {
+  if (!/^[A-Za-z0-9_-]+$/.test(hash)) {
+    return reply.code(404).send({ error: "Not Found" });
+  }
+
+  const assetPath = path.join(webviewRoot, "assets", `index-${hash}.js`);
+  return reply
+    .header("Content-Type", "text/javascript; charset=utf-8")
+    .header("Cache-Control", "no-cache")
+    .send(await getPatchedMainAsset(assetPath));
+}
+
+async function sendWebviewIndexHtml(
+  reply: FastifyReply,
+  webviewRoot: string,
+): Promise<FastifyReply> {
+  return reply
+    .header("Content-Type", "text/html; charset=utf-8")
+    .header("Cache-Control", "no-cache")
+    .send(await getWebviewIndexHtml(webviewRoot));
+}
+
 async function getWorkspaceDirectoryEntries({
   directoryPath,
   directoriesOnly,
@@ -369,12 +523,21 @@ function ensureElectronLikeProcessContext(): void {
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
-  const websocketServer = new WebSocketServer({ noServer: true });
+  const websocketServer = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: {
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true,
+      threshold: 1024,
+    },
+  });
   const sockets = new Set<WebSocket>();
   const configuredPassword = process.env.CODEX_WEB_PASSWORD?.trim() || null;
+  const accessLogEnabled = process.env.CODEX_WEB_ACCESS_LOG === "1";
   const expectedAuthToken = configuredPassword
     ? authTokenForPassword(configuredPassword)
     : null;
+  const webviewRoot = path.resolve(__dirname, "../../scratch/asar/webview");
 
   app.addContentTypeParser(
     "application/x-www-form-urlencoded",
@@ -384,10 +547,16 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     },
   );
 
-  app.addHook("onResponse", async (request, reply) => {
-    console.log(
-      `[http] ${request.method} ${request.url} ${reply.statusCode}`,
-    );
+  if (accessLogEnabled) {
+    app.addHook("onResponse", async (request, reply) => {
+      console.log(
+        `[http] ${request.method} ${request.url} ${reply.statusCode}`,
+      );
+    });
+  }
+
+  await app.register(fastifyCompress, {
+    encodings: ["br", "gzip", "deflate"],
   });
 
   await app.register(fastifyMultipart, {
@@ -468,13 +637,24 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     decorateReply: false,
   });
 
-  await app.register(fastifyStatic, {
-    root: path.resolve(__dirname, "../../scratch/asar/webview"),
-    prefix: "/",
+  app.get("/", async (_request, reply) => {
+    return sendWebviewIndexHtml(reply, webviewRoot);
   });
 
-  app.get("/", async (_request, reply) => {
-    return reply.sendFile("index.html");
+  app.get("/index.html", async (_request, reply) => {
+    return sendWebviewIndexHtml(reply, webviewRoot);
+  });
+
+  app.get<{ Params: MainAssetParams }>(
+    "/assets/index-:hash.js",
+    async (request, reply) => {
+      return sendPatchedMainAsset(reply, webviewRoot, request.params.hash);
+    },
+  );
+
+  await app.register(fastifyStatic, {
+    root: webviewRoot,
+    prefix: "/",
   });
 
   app.setNotFoundHandler((request, reply) => {
@@ -483,7 +663,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
 
     if (request.method === "GET") {
-      return reply.sendFile("index.html");
+      return sendWebviewIndexHtml(reply, webviewRoot);
     }
     return reply.code(404).send({ error: "Not Found" });
   });
@@ -496,12 +676,16 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       url.pathname !== "/__backend/ipc" ||
       !isAuthenticated(request.headers.cookie, expectedAuthToken)
     ) {
-      console.log(`[ws] rejected ${url.pathname}`);
+      if (accessLogEnabled) {
+        console.log(`[ws] rejected ${url.pathname}`);
+      }
       socket.destroy();
       return;
     }
 
-    console.log(`[ws] accepted ${url.pathname}`);
+    if (accessLogEnabled) {
+      console.log(`[ws] accepted ${url.pathname}`);
+    }
     websocketServer.handleUpgrade(request, socket, head, (upgradedSocket) => {
       websocketServer.emit("connection", upgradedSocket, request);
     });
@@ -619,6 +803,8 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   if (matches.length > 1) {
     throw new Error("multiple main bundles found");
   }
+
+  installConsoleLogFilters();
 
   const module = require(matches[0]!);
   module.runMainAppStartup();

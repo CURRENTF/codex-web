@@ -421,7 +421,7 @@ export const ipcRenderer = {
           image_detail_original: true,
           workspace_dependencies: true,
           guardian_approval: true,
-          apps: true,
+          apps: false,
           plugins: true,
           tool_search: true,
           tool_suggest: false,
