@@ -1,82 +1,100 @@
---- a/webview/assets/index-D-3V455n.js
-+++ b/webview/assets/index-D-3V455n.js
-@@ -163,7 +163,7 @@
-   c as l,
-   d as u,
-   f as d,
--  h as f,
+--- a/webview/assets/app-main-Dsg36Y4q.js
++++ b/webview/assets/app-main-Dsg36Y4q.js
+@@ -711,6 +711,7 @@
+   c as ri,
+   d as ii,
+   f as ai,
 +  h as useSearchParams,
-   i as p,
-   l as m,
-   m as h,
-@@ -43178,7 +43178,7 @@
-     r = ue(et),
-     i = he(),
-     a = x().state,
--    [o, s] = f(),
-+    [o, s] = useSearchParams(),
-     [c, l] = (0, Z.useState)(!1),
-     [u, d] = (0, Z.useState)(!1),
-     p = (0, Z.useRef)(null),
-@@ -82581,6 +82581,8 @@
-     z = rt(RB),
-     V = xi(),
-     H = xB(j),
+   i as oi,
+   l as si,
+   n as ci,
+@@ -22270,6 +22271,8 @@
+     p = ss(),
+     m = ai(),
+     h = pi(),
 +    [searchParams] = useSearchParams(),
 +    searchParamsPrompt = searchParams.get(`prompt`),
-     U = async (e, t, n, r, i) => {
-       switch (k?.type) {
-         case `local`:
-@@ -82762,6 +82764,7 @@
-       (0, $.jsx)(`div`, { id: cd, className: `relative px-5 empty:hidden` }),
-       (0, $.jsx)(`div`, { id: ru, className: `relative px-5 empty:hidden` }),
-       (0, $.jsxs)(tJ, {
-+        defaultText: searchParamsPrompt ?? void 0,
-         children: [
-           !v && r && i === `floating`
-             ? (0, $.jsx)(`div`, {
-@@ -82801,6 +82804,7 @@
-             showHotkeyWindowHomeFooterControls: v,
-             showPlanKeywordSuggestion: y,
-             placeholderText: x,
-+            initialPrompt: searchParamsPrompt ?? void 0,
-             hotkeyWindowHomeOverflowMenu: S,
-             surfaceClassName: u,
-             threadBranchName: f,
-@@ -82829,6 +82833,7 @@
-   showHotkeyWindowHomeFooterControls: u,
+     g = h.state;
+   Fw({
+     hostId: i,
+@@ -22570,6 +22573,8 @@
+                                       aboveComposerContent: te,
+                                       browserConversationId: j,
+                                       canStartRealtimeConversation: !0,
++                                      defaultText: searchParamsPrompt ?? void 0,
++                                      initialPrompt: searchParamsPrompt ?? void 0,
+                                       onLocalConversationCreated: N,
+                                       externalFooterVariant: `home`,
+                                       showExternalFooter: se,
+@@ -22603,6 +22608,8 @@
+                         browserConversationId: j,
+                         canStartRealtimeConversation: !0,
+                         composerLayoutMode: `auto-single-line`,
++                        defaultText: searchParamsPrompt ?? void 0,
++                        initialPrompt: searchParamsPrompt ?? void 0,
+                         onLocalConversationCreated: N,
+                         showWorkspaceDropdownInFooter: !1,
+                         hideRunLocationDropdownOverride: C.kind !== `git`,
+--- a/webview/assets/composer-CL8HPtlL.js
++++ b/webview/assets/composer-CL8HPtlL.js
+@@ -67407,6 +67407,7 @@
    showPlanKeywordSuggestion: f,
-   placeholderText: p,
+   composerModeAvailability: m,
+   placeholderText: h,
 +  initialPrompt,
-   hotkeyWindowHomeOverflowMenu: m,
-   onSubmitLocal: h,
-   onSubmitWorktree: g,
-@@ -83101,9 +83106,16 @@
-     hr = Rn.selectedTextAttachments,
-     gr = Rn.pullRequestChecks;
-   (0, Z.useEffect)(() => {
--    dr.current !== lr &&
--      ((dr.current = lr), wu(pr) ? An.setPromptText(pr) : An.setText(pr));
--  }, [lr, pr, An]);
-+    if (dr.current !== lr) {
-+      dr.current = lr;
-+      let e = pr;
-+      (e === `` &&
-+        initialPrompt != null &&
-+        initialPrompt !== `` &&
-+        ((e = initialPrompt), zn((t) => DI(t, `prompt`, e))),
-+        wu(e) ? An.setPromptText(e) : An.setText(e));
-+    }
-+  }, [lr, pr, An, initialPrompt, zn]);
-   let _r = (0, Z.useCallback)(
-       (e, t) => {
-         zn((n) => DI(n, e, t));
-@@ -133022,7 +133034,7 @@
-   let e = (0, Q.c)(38),
-     t = ka(),
-     n = d(),
--    [r] = f(),
-+    [r] = useSearchParams(),
-     [i, a] = kr(hhe),
-     o = r.get(`repoKey`),
-     s;
+   composerLayoutMode: _,
+   hotkeyWindowHomeFooterControls: v,
+   onSubmitLocal: y,
+@@ -67859,7 +67860,14 @@
+       (sn && ci(sn),
+         rn && ha(rn),
+         ga != null && da(ga),
+-        nn && nn !== An.getText() && An.setPromptText(nn),
++        nn && nn !== An.getText()
++          ? An.setPromptText(nn)
++          : !nn &&
++              initialPrompt != null &&
++              initialPrompt !== `` &&
++              An.getText() === ``
++            ? An.setPromptText(initialPrompt)
++            : null,
+         an != null &&
+           an.length > 0 &&
+           ji((e) => {
+@@ -67877,7 +67885,7 @@
+     });
+   (0, $.useEffect)(() => {
+     ba();
+-  }, [nn, rn, an, on, ga]);
++  }, [nn, rn, an, on, ga, initialPrompt]);
+   let [xa, Sa] = Ai(`composer_prefill`),
+     wa = (0, $.useEffectEvent)(() => {
+       let e = xa?.commentAttachments;
+@@ -69778,6 +69786,8 @@
+   hideRunLocationDropdownOverride: v = !1,
+   composerModeAvailability: y,
+   placeholderText: b,
++  defaultText,
++  initialPrompt,
+   composerLayoutMode: x = `multiline`,
+   hotkeyWindowHomeFooterControls: S,
+   lockedCollaborationMode: C,
+@@ -70056,8 +70066,8 @@
+       (0, Q.jsxs)(
+         FG,
+         {
+-          defaultText: M,
+-          defaultTextKind: nd(M) ? `prompt` : `plain`,
++          defaultText: defaultText ?? M,
++          defaultTextKind: nd(defaultText ?? M) ? `prompt` : `plain`,
+           children: [
+             S == null && n && r === `floating`
+               ? (0, Q.jsx)(`div`, {
+@@ -70090,6 +70100,7 @@
+               showPlanKeywordSuggestion: g,
+               composerModeAvailability: y,
+               placeholderText: b,
++              initialPrompt,
+               composerLayoutMode: x,
+               hotkeyWindowHomeFooterControls: S,
+               surfaceClassName: c,
