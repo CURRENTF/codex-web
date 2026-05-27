@@ -1,12 +1,20 @@
 --- a/webview/assets/app-server-manager-signals-BAE2L06u.js
 +++ b/webview/assets/app-server-manager-signals-BAE2L06u.js
-@@ -16756,7 +16756,14 @@
+@@ -16756,7 +16756,22 @@
                  normalizeRestrictedImageDisplayPlaceholders: !1,
                }),
                s = i || (u == null && !Nv(a, a.length));
 -            o || !s ? a.push({ type: `steered`, id: n.id }) : a.push(r);
 +            o
-+              ? a.push({ type: `steered`, id: n.id })
++              ? a.some(
++                  (e) =>
++                    e.type === `user-message` && e.steeringMessageId === o.id,
++                )
++                ? a.push({ type: `steered`, id: n.id })
++                : a.push(
++                    { ...r, steeringStatus: `accepted`, steeringMessageId: o.id },
++                    { type: `steered`, id: n.id },
++                  )
 +              : s
 +                ? a.push(r)
 +                : a.push(
@@ -16,3 +24,25 @@
            }
            break;
          }
+@@ -16768,7 +16783,8 @@
+             normalizeRestrictedImageDisplayPlaceholders: !1,
+             sentAtMs: null,
+           }).item;
+-          e != null && a.push({ ...e, steeringStatus: n.status });
++          e != null &&
++            a.push({ ...e, steeringStatus: n.status, steeringMessageId: n.id });
+           break;
+         }
+         case `steered`:
+@@ -17110,9 +17126,9 @@
+ function Lv(e, t, n, r) {
+   for (let i = 0; i < t; i += 1) {
+     let t = e[i];
+-    if (t?.type === `steeringUserMessage` && wu(t, n, r)) return !0;
++    if (t?.type === `steeringUserMessage` && wu(t, n, r)) return t;
+   }
+-  return !1;
++  return null;
+ }
+ function Rv(e) {
+   return (

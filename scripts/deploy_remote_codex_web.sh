@@ -182,13 +182,15 @@ log "runtime patch"
 const fs = require("fs");
 
 const assetPath = "scratch/asar/webview/assets/app-server-manager-signals-BAE2L06u.js";
-const minifiedBefore =
+const userMessageOriginalMinified =
   "o||!s?a.push({type:`steered`,id:n.id}):a.push(r)";
-const minifiedAfter =
+const userMessagePreviousMinified =
   "o?a.push({type:`steered`,id:n.id}):s?a.push(r):a.push({...r,steeringStatus:`accepted`},{type:`steered`,id:n.id})";
-const formattedBefore =
+const userMessagePatchedMinified =
+  "o?a.some(e=>e.type===`user-message`&&e.steeringMessageId===o.id)?a.push({type:`steered`,id:n.id}):a.push({...r,steeringStatus:`accepted`,steeringMessageId:o.id},{type:`steered`,id:n.id}):s?a.push(r):a.push({...r,steeringStatus:`accepted`},{type:`steered`,id:n.id})";
+const userMessageOriginalFormatted =
   "o || !s ? a.push({ type: `steered`, id: n.id }) : a.push(r);";
-const formattedAfter = `o
+const userMessagePreviousFormatted = `o
               ? a.push({ type: \`steered\`, id: n.id })
               : s
                 ? a.push(r)
@@ -196,29 +198,110 @@ const formattedAfter = `o
                     { ...r, steeringStatus: \`accepted\` },
                     { type: \`steered\`, id: n.id },
                   );`;
+const userMessagePatchedFormatted = `o
+              ? a.some(
+                  (e) =>
+                    e.type === \`user-message\` && e.steeringMessageId === o.id,
+                )
+                ? a.push({ type: \`steered\`, id: n.id })
+                : a.push(
+                    { ...r, steeringStatus: \`accepted\`, steeringMessageId: o.id },
+                    { type: \`steered\`, id: n.id },
+                  )
+              : s
+                ? a.push(r)
+                : a.push(
+                    { ...r, steeringStatus: \`accepted\` },
+                    { type: \`steered\`, id: n.id },
+                  );`;
+
+const steeringUserPreviousMinified =
+  "e!=null&&a.push({...e,steeringStatus:n.status});";
+const steeringUserPatchedMinified =
+  "e!=null&&a.push({...e,steeringStatus:n.status,steeringMessageId:n.id});";
+const steeringUserPreviousFormatted =
+  "e != null && a.push({ ...e, steeringStatus: n.status });";
+const steeringUserPatchedFormatted = `e != null &&
+            a.push({ ...e, steeringStatus: n.status, steeringMessageId: n.id });`;
+
+const matcherPreviousMinified =
+  "function Lv(e,t,n,r){for(let i=0;i<t;i+=1){let t=e[i];if(t?.type===`steeringUserMessage`&&wu(t,n,r))return!0}return!1}";
+const matcherPatchedMinified =
+  "function Lv(e,t,n,r){for(let i=0;i<t;i+=1){let t=e[i];if(t?.type===`steeringUserMessage`&&wu(t,n,r))return t}return null}";
+const matcherPreviousFormatted = `function Lv(e, t, n, r) {
+  for (let i = 0; i < t; i += 1) {
+    let t = e[i];
+    if (t?.type === \`steeringUserMessage\` && wu(t, n, r)) return !0;
+  }
+  return !1;
+}`;
+const matcherPatchedFormatted = `function Lv(e, t, n, r) {
+  for (let i = 0; i < t; i += 1) {
+    let t = e[i];
+    if (t?.type === \`steeringUserMessage\` && wu(t, n, r)) return t;
+  }
+  return null;
+}`;
+
+function replaceRuntimePatch(source, name, patchedNeedles, replacements) {
+  const needles = Array.isArray(patchedNeedles) ? patchedNeedles : [patchedNeedles];
+  if (needles.some((needle) => source.includes(needle))) {
+    console.log(`${name} runtime patch already present`);
+    return source;
+  }
+  for (const [before, after, label] of replacements) {
+    if (source.includes(before)) {
+      console.log(`applied ${label} ${name} runtime patch`);
+      return source.replace(before, after);
+    }
+  }
+  throw new Error(`could not find ${name} runtime patch target`);
+}
 
 let source = fs.readFileSync(assetPath, "utf8");
-if (source.includes(minifiedAfter) || source.includes("{ ...r, steeringStatus: `accepted` }")) {
-  console.log("steered user-message runtime patch already present");
-} else if (source.includes(minifiedBefore)) {
-  source = source.replace(minifiedBefore, minifiedAfter);
-  fs.writeFileSync(assetPath, source);
-  console.log("applied minified steered user-message runtime patch");
-} else if (source.includes(formattedBefore)) {
-  source = source.replace(formattedBefore, formattedAfter);
-  fs.writeFileSync(assetPath, source);
-  console.log("applied formatted steered user-message runtime patch");
-} else {
-  throw new Error("could not find steered user-message runtime patch target");
-}
+source = replaceRuntimePatch(source, "steered user-message", [
+  "steeringMessageId:o.id",
+  "steeringMessageId: o.id",
+], [
+  [userMessagePreviousMinified, userMessagePatchedMinified, "minified previous"],
+  [userMessageOriginalMinified, userMessagePatchedMinified, "minified original"],
+  [userMessagePreviousFormatted, userMessagePatchedFormatted, "formatted previous"],
+  [userMessageOriginalFormatted, userMessagePatchedFormatted, "formatted original"],
+]);
+source = replaceRuntimePatch(source, "steering-user marker", [
+  "steeringMessageId:n.id",
+  "steeringMessageId: n.id",
+], [
+  [steeringUserPreviousMinified, steeringUserPatchedMinified, "minified"],
+  [steeringUserPreviousFormatted, steeringUserPatchedFormatted, "formatted"],
+]);
+source = replaceRuntimePatch(source, "steering matcher", [
+  matcherPatchedMinified,
+  matcherPatchedFormatted,
+], [
+  [matcherPreviousMinified, matcherPatchedMinified, "minified"],
+  [matcherPreviousFormatted, matcherPatchedFormatted, "formatted"],
+]);
+fs.writeFileSync(assetPath, source);
 
 const next = fs.readFileSync(assetPath, "utf8");
 const hasPatch =
-  next.includes(minifiedAfter) ||
-  next.includes("{ ...r, steeringStatus: `accepted` }");
+  (next.includes("steeringMessageId:o.id") ||
+    next.includes("steeringMessageId: o.id")) &&
+  (next.includes("steeringMessageId:n.id") ||
+    next.includes("steeringMessageId: n.id")) &&
+  (next.includes(matcherPatchedMinified) || next.includes(matcherPatchedFormatted));
 const oldCount =
-  next.split(minifiedBefore).length - 1 +
-  next.split(formattedBefore).length - 1;
+  [
+    userMessageOriginalMinified,
+    userMessagePreviousMinified,
+    userMessageOriginalFormatted,
+    userMessagePreviousFormatted,
+    steeringUserPreviousMinified,
+    steeringUserPreviousFormatted,
+    matcherPreviousMinified,
+    matcherPreviousFormatted,
+  ].reduce((count, needle) => count + next.split(needle).length - 1, 0);
 if (!hasPatch || oldCount !== 0) {
   throw new Error(`runtime patch verification failed: hasPatch=${hasPatch} oldCount=${oldCount}`);
 }
