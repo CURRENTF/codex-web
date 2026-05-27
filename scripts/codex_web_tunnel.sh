@@ -7,7 +7,8 @@ SSH_PORT="${CODEX_WEB_SSH_PORT:-22160}"
 LOCAL_TUNNEL_PORT="${CODEX_WEB_LOCAL_TUNNEL_PORT:-16006}"
 LOCAL_WEB_PORT="${CODEX_WEB_LOCAL_WEB_PORT:-6006}"
 REMOTE_WEB_PORT="${CODEX_WEB_REMOTE_WEB_PORT:-6006}"
-PROXY_LABEL="${CODEX_WEB_PROXY_LABEL:-com.codex-web.cached-proxy}"
+PROXY_LABEL_OVERRIDE="${CODEX_WEB_PROXY_LABEL:-}"
+PROXY_LABEL="${PROXY_LABEL_OVERRIDE:-com.codex-web.cached-proxy}"
 RUNTIME_DIR="${CODEX_WEB_RUNTIME_DIR:-$HOME/.cache/codex-web/runtime}"
 CACHE_DIR="${CODEX_WEB_CACHE_DIR:-$HOME/.cache/codex-web/assets}"
 LOG_DIR="${CODEX_WEB_LOG_DIR:-$HOME/.cache/codex-web}"
@@ -46,6 +47,13 @@ EOF
 refresh_derived_settings() {
   UPSTREAM="http://127.0.0.1:${LOCAL_TUNNEL_PORT}"
   WEB_URL="http://127.0.0.1:${LOCAL_WEB_PORT}"
+  if [[ -n "$PROXY_LABEL_OVERRIDE" ]]; then
+    PROXY_LABEL="$PROXY_LABEL_OVERRIDE"
+  elif [[ "$LOCAL_WEB_PORT" = "6006" && "$LOCAL_TUNNEL_PORT" = "16006" ]]; then
+    PROXY_LABEL="com.codex-web.cached-proxy"
+  else
+    PROXY_LABEL="com.codex-web.cached-proxy.${LOCAL_WEB_PORT}"
+  fi
 }
 
 parse_connection_args() {

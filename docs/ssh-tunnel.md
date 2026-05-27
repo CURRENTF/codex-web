@@ -60,6 +60,73 @@ codex-web-tunnel start \
   -p 12345 root@example.com
 ```
 
+When non-default local ports are used, the wrapper automatically uses a
+port-specific `launchctl` label for the local cached proxy so it does not stop
+another `codex-web` tunnel that is already running on `6006`.
+
+### guest-KR6288 / haojitai
+
+Observed on 2026-05-26: `haojitai@10.249.41.102` runs `codex-web` from:
+
+```text
+/home/haojitai/projects/codex-web
+```
+
+The remote service is managed by the user systemd unit:
+
+```text
+/home/haojitai/.config/systemd/user/codex-web.service
+```
+
+It listens only on:
+
+```text
+127.0.0.1:6007
+```
+
+Remote port `6006` was already occupied by another user on this shared
+`guest-KR6288` host, so use `--remote-web-port 6007` when connecting:
+
+```bash
+codex-web-tunnel start \
+  -p 22 \
+  --local-web-port 6008 \
+  --local-tunnel-port 16008 \
+  --remote-web-port 6007 \
+  haojitai@10.249.41.102
+```
+
+Then open:
+
+```text
+http://127.0.0.1:6008
+```
+
+The web login password is stored on the remote host at:
+
+```text
+/home/haojitai/.config/codex-web/password
+```
+
+Service logs are written under:
+
+```text
+/data2/haojitai/outputs/codex-web/logs
+```
+
+`loginctl show-user haojitai -p Linger` reported `Linger=no` on 2026-05-26.
+The unit is enabled for the user manager and starts in active user sessions; a
+root/admin user would need to enable linger if it must survive all logouts and
+start before login.
+
+Useful remote checks:
+
+```bash
+ssh haojitai@10.249.41.102 'systemctl --user status codex-web.service'
+ssh haojitai@10.249.41.102 'curl -I http://127.0.0.1:6007/'
+ssh haojitai@10.249.41.102 'tail -n 80 /data2/haojitai/outputs/codex-web/logs/codex-web.log'
+```
+
 Manual tunnel without the local cache:
 
 ```bash
