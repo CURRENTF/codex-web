@@ -61,6 +61,40 @@ The browser shim disables the upstream `apps` feature by default because the
 native app inventory is large on Linux hosts and is not needed for remote
 session management.
 
+## Restart
+
+Observed on 2026-05-28: the AutoDL host runs `codex-web` directly from
+`/root/codex-web` with the parent process recorded in `logs/codex-web.pid`.
+From a local checkout, deploy the latest `main`, patch the ignored `scratch/asar`
+runtime bundle if needed, restart the web server, and verify the app-server
+child process with:
+
+```bash
+scripts/deploy_remote_codex_web.sh -p 22160 root@connect.westb.seetacloud.com
+```
+
+The script uses these remote defaults, all overrideable with `CODEX_WEB_*`
+environment variables or CLI flags:
+
+- repo: `/root/codex-web`
+- Node: `/root/node/bin/node`
+- Codex CLI: `/root/npm-global/bin/codex`
+- web server: `127.0.0.1:6006`
+
+For a patch-only check without restarting:
+
+```bash
+scripts/deploy_remote_codex_web.sh --no-pull --no-restart -p 22160 root@connect.westb.seetacloud.com
+```
+
+Manual verification on the remote host:
+
+```bash
+curl -fsS http://127.0.0.1:6006/ >/dev/null
+ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex app-server' | grep -v grep
+netstat -ltnp 2>/dev/null | grep ':6006'
+```
+
 ## Security
 
 Do not bind this directly to a public interface without an authentication layer.
