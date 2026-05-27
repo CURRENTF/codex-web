@@ -1,0 +1,18 @@
+--- a/webview/assets/app-server-manager-signals-BAE2L06u.js
++++ b/webview/assets/app-server-manager-signals-BAE2L06u.js
+@@ -16756,7 +16756,14 @@
+                 normalizeRestrictedImageDisplayPlaceholders: !1,
+               }),
+               s = i || (u == null && !Nv(a, a.length));
+-            o || !s ? a.push({ type: `steered`, id: n.id }) : a.push(r);
++            o
++              ? a.push({ type: `steered`, id: n.id })
++              : s
++                ? a.push(r)
++                : a.push(
++                    { ...r, steeringStatus: `accepted` },
++                    { type: `steered`, id: n.id },
++                  );
+           }
+           break;
+         }
