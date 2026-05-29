@@ -5,6 +5,7 @@ type StubWebContents = {
   mainFrame: {
     url: string;
   };
+  addListener: (event: string, listener: StubListener) => unknown;
   isDestroyed: () => boolean;
   off: (event: string, listener: StubListener) => unknown;
   on: (event: string, listener: StubListener) => unknown;
@@ -32,12 +33,12 @@ type IpcMainBridgeState = {
   handleRendererInvoke?: (
     channel: string,
     args: unknown[],
-    sourceUrl?: string,
+    sender?: StubWebContents,
   ) => Promise<unknown>;
   handleRendererSend?: (
     channel: string,
     args: unknown[],
-    sourceUrl?: string,
+    sender?: StubWebContents,
   ) => void;
 };
 
@@ -165,6 +166,7 @@ const rendererWebContents: StubWebContents = {
   id: 1001,
   mainFrame: rendererMainFrame,
   isDestroyed: () => false,
+  addListener: rendererWebContentsEmitter.addListener,
   off: rendererWebContentsEmitter.off,
   on: rendererWebContentsEmitter.on,
   once: rendererWebContentsEmitter.once,
@@ -178,19 +180,15 @@ const rendererWebContents: StubWebContents = {
   },
 };
 
-function createIpcMainEvent(): IpcMainEvent {
+function createIpcMainEvent(sender = rendererWebContents): IpcMainEvent {
   const event: IpcMainEvent = {
     returnValue: undefined,
     processId: 1,
     frameId: 1,
-    sender: rendererWebContents,
-    senderFrame: rendererMainFrame,
+    sender,
+    senderFrame: sender.mainFrame,
     reply: (channel: string, ...args: unknown[]): void => {
-      getIpcMainBridgeState().broadcastToRenderer?.({
-        type: "ipc-main-event",
-        channel,
-        args,
-      });
+      sender.send(channel, ...args);
     },
   };
 
@@ -216,21 +214,22 @@ function createIpcMainStub(): {
   bridgeState.handleRendererInvoke = async (
     channel: string,
     args: unknown[],
+    sender = rendererWebContents,
   ): Promise<unknown> => {
     const handler = handlers.get(channel);
     if (!handler) {
       throw new Error(`[electron-main-stub] No ipcMain.handle for ${channel}`);
     }
-    const event = createIpcMainEvent();
+    const event = createIpcMainEvent(sender);
     return await Promise.resolve(handler(event, ...args));
   };
 
   bridgeState.handleRendererSend = (
     channel: string,
     args: unknown[],
-    sourceUrl?: string,
+    sender = rendererWebContents,
   ): void => {
-    const event = createIpcMainEvent();
+    const event = createIpcMainEvent(sender);
     emitter.emit(channel, event, ...args);
   };
 
@@ -413,13 +412,26 @@ class BrowserWindow {
 
   static getFocusedWindow(): BrowserWindow | null {
     log("BrowserWindow.getFocusedWindow", []);
-    if (
-      BrowserWindow.focusedWindow &&
-      !BrowserWindow.focusedWindow.destroyed
-    ) {
+    if (BrowserWindow.focusedWindow && !BrowserWindow.focusedWindow.destroyed) {
       return BrowserWindow.focusedWindow;
     }
     return BrowserWindow.getAllWindows()[0] ?? null;
+  }
+
+  static fromWebContents(
+    webContents: { id?: unknown } | null | undefined,
+  ): BrowserWindow | null {
+    log("BrowserWindow.fromWebContents", [webContents]);
+    const id = webContents?.id;
+    if (typeof id !== "number") {
+      return null;
+    }
+    return (
+      BrowserWindow.getAllWindows().find(
+        (window) =>
+          (window.webContents as { id?: unknown } | undefined)?.id === id,
+      ) ?? null
+    );
   }
 
   on(event: string, listener: StubListener): unknown {
@@ -701,7 +713,13 @@ const nativeImage = {
     };
   },
 };
-const powerMonitor = createEmitterStub("powerMonitor");
+const powerMonitor = {
+  ...createEmitterStub("powerMonitor"),
+  isOnBatteryPower(): boolean {
+    log("powerMonitor.isOnBatteryPower", []);
+    return false;
+  },
+};
 const screen = {
   ...createEmitterStub("screen"),
   getAllDisplays(): Array<{
@@ -817,14 +835,19 @@ function createSessionStub(label: string): {
     },
   };
 }
-const partitionSessions = new Map<string, ReturnType<typeof createSessionStub>>();
+const partitionSessions = new Map<
+  string,
+  ReturnType<typeof createSessionStub>
+>();
 const session = {
   defaultSession: createSessionStub("session.defaultSession"),
   fromPartition(partition: string): ReturnType<typeof createSessionStub> {
     log("session.fromPartition", [partition]);
     let partitionSession = partitionSessions.get(partition);
     if (!partitionSession) {
-      partitionSession = createSessionStub(`session.fromPartition(${partition})`);
+      partitionSession = createSessionStub(
+        `session.fromPartition(${partition})`,
+      );
       partitionSessions.set(partition, partitionSession);
     }
     return partitionSession;

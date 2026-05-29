@@ -32,6 +32,13 @@ CODEX_HOME=/root/.codex CODEX_WEB_PASSWORD='<choose-a-password>' CODEX_CLI_PATH=
 Open `http://127.0.0.1:6006` from a browser on the same machine, or expose it
 through an SSH tunnel / trusted private network.
 
+For a cloud-provider Web entry that connects directly to the container port,
+bind the server to all interfaces while keeping `CODEX_WEB_PASSWORD` set:
+
+```bash
+CODEX_HOME=/root/.codex CODEX_WEB_PASSWORD='<choose-a-password>' CODEX_CLI_PATH=/root/npm-global/bin/codex node src/server/main.js --host 0.0.0.0 --port 6006
+```
+
 Use the normal Codex profile (`/root/.codex`) for remote web usage so sessions,
 projects, auth, and CLI state stay shared with `codex-cli` over SSH. A temporary
 dedicated `CODEX_HOME` can be useful for isolating startup issues, but it will
@@ -95,6 +102,33 @@ ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex app-server' | grep -v
 netstat -ltnp 2>/dev/null | grep ':6006'
 ```
 
+## Autostart
+
+Observed on 2026-05-28: the SeetaCloud container startup path runs
+`/etc/autodl.sh` from `/init/bin/customer.cmd.sh`. The remote host is configured
+to start `codex-web` from that hook.
+
+Remote files:
+
+- start script: `/root/.local/bin/codex-web-start`
+- root-only environment file: `/root/.config/codex-web/env`
+- boot hook: `/etc/autodl.sh`
+- autostart log: `/root/autodl-fs/logs/codex-web/autostart.log`
+- server log: `/root/autodl-fs/logs/codex-web/codex-web.log`
+
+The environment file keeps `CODEX_WEB_PASSWORD` outside the repo and should stay
+mode `600`. The start script is idempotent: if `codex-web` is already listening
+on the configured port, it records that and exits.
+
+Manual autostart verification on the remote host:
+
+```bash
+bash /etc/autodl.sh
+tail -40 /root/autodl-fs/logs/codex-web/autostart.log
+ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex app-server' | grep -v grep
+netstat -ltnp 2>/dev/null | grep ':6006'
+```
+
 ## Security
 
 Do not bind this directly to a public interface without an authentication layer.
@@ -106,6 +140,13 @@ server.
 - Observed on 2026-05-09: `npm install --omit=dev` completed successfully.
 - A full `npm install` stalled in Electron's `node install.js` download step.
 - Observed on 2026-05-09: password protection was verified on port `6006`.
+- Observed on 2026-05-28: SeetaCloud direct Web access was started on
+  `0.0.0.0:6006`; unauthenticated requests redirected to login, password login
+  returned the app HTML, and the Codex app-server child connected successfully.
+- Observed on 2026-05-28: autostart was installed through `/etc/autodl.sh` and
+  verified by stopping the running server, invoking the boot hook, and checking
+  that `0.0.0.0:6006` came back with password login and the Codex app-server
+  child process.
 - Observed on 2026-05-24: HTTP asset compression and WebSocket compression are
   enabled for tunnel usage; the main JS asset was served with `gzip`.
 - Observed on 2026-05-24: the upstream webview index referenced 132 assets,

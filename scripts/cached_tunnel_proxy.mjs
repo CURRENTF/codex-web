@@ -7,6 +7,7 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import { pipeline } from "node:stream";
 import { gzipSync, gunzipSync } from "node:zlib";
 
 const require = createRequire(import.meta.url);
@@ -20,6 +21,56 @@ const cacheDir = path.resolve(
 );
 const cacheVersion = process.env.CODEX_WEB_CACHE_VERSION ?? "v2";
 let transformJavaScriptSync = null;
+const handledSockets = new WeakSet();
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isExpectedDisconnect(error) {
+  return ["ECONNRESET", "EPIPE", "ERR_STREAM_PREMATURE_CLOSE"].includes(
+    error?.code,
+  );
+}
+
+function logStreamError(label, error) {
+  if (!isExpectedDisconnect(error)) {
+    console.error(`[${label}] ${errorMessage(error)}`);
+  }
+}
+
+function attachSocketErrorHandler(socket, label) {
+  if (!socket || handledSockets.has(socket)) {
+    return;
+  }
+  handledSockets.add(socket);
+  socket.on("error", (error) => {
+    logStreamError(label, error);
+  });
+}
+
+function pipeStream(source, destination, label) {
+  pipeline(source, destination, (error) => {
+    if (error) {
+      logStreamError(label, error);
+    }
+  });
+}
+
+function sendPlainError(response, statusCode, message) {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+
+  try {
+    if (!response.headersSent) {
+      response.writeHead(statusCode, { "content-type": "text/plain" });
+    }
+    response.end(message);
+  } catch (error) {
+    logStreamError("client response", error);
+  }
+}
 
 function hopByHopHeaders() {
   return new Set([
@@ -50,7 +101,9 @@ function isCacheableAssetRequest(request) {
   }
   const url = new URL(request.url ?? "/", "http://codex-web.local");
   const acceptEncoding = String(request.headers["accept-encoding"] ?? "");
-  return url.pathname.startsWith("/assets/") && /\bgzip\b/i.test(acceptEncoding);
+  return (
+    url.pathname.startsWith("/assets/") && /\bgzip\b/i.test(acceptEncoding)
+  );
 }
 
 function upstreamRequestOptions(request, forceGzip) {
@@ -112,14 +165,18 @@ function maybeMinifyJavaScript(rawUrl, headers, body) {
     return { headers, body };
   }
 
-  const contentEncoding = String(headerValue(headers, "content-encoding") ?? "");
+  const contentEncoding = String(
+    headerValue(headers, "content-encoding") ?? "",
+  );
   if (contentEncoding && contentEncoding.toLowerCase() !== "gzip") {
     return { headers, body };
   }
 
   try {
     transformJavaScriptSync ??= require("esbuild").transformSync;
-    const source = contentEncoding ? gunzipSync(body).toString("utf8") : body.toString("utf8");
+    const source = contentEncoding
+      ? gunzipSync(body).toString("utf8")
+      : body.toString("utf8");
     const result = transformJavaScriptSync(source, {
       format: "esm",
       legalComments: "none",
@@ -163,7 +220,7 @@ async function trySendCachedAsset(response, key, method) {
       response.end();
       return true;
     }
-    createReadStream(bodyPath).pipe(response);
+    pipeStream(createReadStream(bodyPath), response, "cached asset");
     return true;
   } catch {
     return false;
@@ -181,12 +238,25 @@ async function storeCachedAsset(key, statusCode, headers, body) {
 }
 
 function proxyHttpRequest(request, response) {
+  request.on("error", (error) => {
+    logStreamError("client request", error);
+  });
+  response.on("error", (error) => {
+    logStreamError("client response", error);
+  });
+  attachSocketErrorHandler(request.socket, "client socket");
+  attachSocketErrorHandler(response.socket, "client socket");
+
   const cacheable = isCacheableAssetRequest(request);
   const key = cacheable ? cacheKeyForUrl(request.url ?? "/") : null;
 
   Promise.resolve()
     .then(async () => {
-      if (cacheable && key && (await trySendCachedAsset(response, key, request.method))) {
+      if (
+        cacheable &&
+        key &&
+        (await trySendCachedAsset(response, key, request.method))
+      ) {
         return;
       }
 
@@ -201,15 +271,27 @@ function proxyHttpRequest(request, response) {
 
           if (!cacheable || statusCode !== 200) {
             response.writeHead(statusCode, headers);
-            upstreamResponse.pipe(response);
+            pipeStream(upstreamResponse, response, "upstream response");
             return;
           }
 
           const chunks = [];
+          upstreamResponse.on("error", (error) => {
+            if (!isExpectedDisconnect(error)) {
+              sendPlainError(
+                response,
+                502,
+                `Upstream response failed: ${errorMessage(error)}`,
+              );
+            }
+          });
           upstreamResponse.on("data", (chunk) => {
             chunks.push(Buffer.from(chunk));
           });
           upstreamResponse.on("end", () => {
+            if (response.destroyed || response.writableEnded) {
+              return;
+            }
             const optimized = maybeMinifyJavaScript(
               request.url,
               headers,
@@ -236,19 +318,19 @@ function proxyHttpRequest(request, response) {
       );
 
       upstreamRequest.on("error", (error) => {
-        if (!response.headersSent) {
-          response.writeHead(502, { "content-type": "text/plain" });
+        if (!isExpectedDisconnect(error) || !response.destroyed) {
+          sendPlainError(
+            response,
+            502,
+            `Upstream request failed: ${errorMessage(error)}`,
+          );
         }
-        response.end(`Upstream request failed: ${error.message}`);
       });
 
-      request.pipe(upstreamRequest);
+      pipeStream(request, upstreamRequest, "client request");
     })
     .catch((error) => {
-      if (!response.headersSent) {
-        response.writeHead(500, { "content-type": "text/plain" });
-      }
-      response.end(`Proxy failed: ${error.message}`);
+      sendPlainError(response, 500, `Proxy failed: ${errorMessage(error)}`);
     });
 }
 
@@ -278,7 +360,13 @@ function proxyUpgrade(request, socket, head) {
     },
   );
 
-  upstreamSocket.on("error", () => {
+  attachSocketErrorHandler(socket, "upgrade client socket");
+  attachSocketErrorHandler(upstreamSocket, "upgrade upstream socket");
+
+  socket.on("close", () => {
+    upstreamSocket.destroy();
+  });
+  upstreamSocket.on("close", () => {
     socket.destroy();
   });
 }

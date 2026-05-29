@@ -119,8 +119,36 @@ function compareWorkspaceDirectoryEntries(
 
 type IpcMainBridgeState = {
   broadcastToRenderer?: (message: MainToRendererMessage) => void;
-  handleRendererInvoke?: (channel: string, args: unknown[]) => Promise<unknown>;
-  handleRendererSend?: (channel: string, args: unknown[]) => void;
+  handleRendererInvoke?: (
+    channel: string,
+    args: unknown[],
+    sender?: RendererWebContentsBridge,
+  ) => Promise<unknown>;
+  handleRendererSend?: (
+    channel: string,
+    args: unknown[],
+    sender?: RendererWebContentsBridge,
+  ) => void;
+};
+
+type RendererWebContentsBridge = {
+  id: number;
+  mainFrame: {
+    url: string;
+  };
+  addListener: (
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => unknown;
+  isDestroyed: () => boolean;
+  off: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  once: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  removeListener: (
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => unknown;
+  send: (channel: string, ...args: unknown[]) => void;
 };
 
 let cachedWebviewIndexHtml: string | null = null;
@@ -216,6 +244,100 @@ function getIpcMainBridgeState(): IpcMainBridgeState {
     globals.__codexElectronIpcBridge = {};
   }
   return globals.__codexElectronIpcBridge;
+}
+
+function createEmitter(): {
+  addListener: (
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => unknown;
+  emit: (event: string, ...args: unknown[]) => boolean;
+  off: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  once: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  removeListener: (
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => unknown;
+} {
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+
+  const api = {
+    on(event: string, listener: (...args: unknown[]) => void): unknown {
+      const eventListeners = listeners.get(event) ?? new Set();
+      eventListeners.add(listener);
+      listeners.set(event, eventListeners);
+      return api;
+    },
+    addListener(
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ): unknown {
+      return api.on(event, listener);
+    },
+    once(event: string, listener: (...args: unknown[]) => void): unknown {
+      const wrapped = (...args: unknown[]) => {
+        api.removeListener(event, wrapped);
+        listener(...args);
+      };
+      return api.on(event, wrapped);
+    },
+    removeListener(
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ): unknown {
+      listeners.get(event)?.delete(listener);
+      return api;
+    },
+    off(event: string, listener: (...args: unknown[]) => void): unknown {
+      return api.removeListener(event, listener);
+    },
+    emit(event: string, ...args: unknown[]): boolean {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(...args);
+      }
+      return true;
+    },
+  };
+
+  return api;
+}
+
+function createRendererWebContentsBridge(
+  socket: WebSocket,
+): RendererWebContentsBridge {
+  const emitter = createEmitter();
+  const mainFrame = { url: "http://localhost:5175/" };
+  let destroyed = false;
+
+  socket.once("close", () => {
+    destroyed = true;
+    emitter.emit("destroyed");
+  });
+
+  return {
+    // Upstream Electron code keys trust and host context off the registered
+    // window webContents id. Keep this stable while routing sends per socket.
+    id: 1001,
+    mainFrame,
+    isDestroyed: () => destroyed || socket.readyState !== WebSocket.OPEN,
+    addListener: emitter.addListener,
+    on: emitter.on,
+    once: emitter.once,
+    off: emitter.off,
+    removeListener: emitter.removeListener,
+    send(channel: string, ...args: unknown[]): void {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const payload: MainToRendererMessage = {
+        type: "ipc-main-event",
+        channel,
+        args,
+      };
+      socket.send(JSON.stringify(payload));
+    },
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -610,7 +732,10 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       return reply.redirect("/");
     }
 
-    return reply.code(401).type("text/html").send(loginPage("Invalid password"));
+    return reply
+      .code(401)
+      .type("text/html")
+      .send(loginPage("Invalid password"));
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -742,6 +867,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   };
 
   websocketServer.on("connection", (socket) => {
+    const rendererWebContents = createRendererWebContentsBridge(socket);
     sockets.add(socket);
 
     socket.on("close", () => {
@@ -758,7 +884,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       }
 
       if (message.type === "ipc-renderer-send") {
-        bridgeState.handleRendererSend?.(message.channel, message.args);
+        bridgeState.handleRendererSend?.(
+          message.channel,
+          message.args,
+          rendererWebContents,
+        );
         return;
       }
 
@@ -793,7 +923,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       if (message.type === "ipc-renderer-invoke") {
         const { channel, requestId, args } = message;
         Promise.resolve(
-          bridgeState.handleRendererInvoke?.(channel, args) ??
+          bridgeState.handleRendererInvoke?.(
+            channel,
+            args,
+            rendererWebContents,
+          ) ??
             Promise.reject(
               new Error(
                 `[ipc-bridge] no ipcMain.handle for channel ${channel}`,
