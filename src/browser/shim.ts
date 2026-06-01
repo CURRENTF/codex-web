@@ -465,6 +465,6 @@ export const contextBridge = {
 
 export const webUtils = {
   getPathForFile(_file: File): string | null {
-    return unimplemented("webUtils.getPathForFile");
+    return null;
   },
 };
