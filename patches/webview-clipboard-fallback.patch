@@ -1,0 +1,96 @@
+--- a/webview/assets/copy-to-clipboard-HROK9-1F.js
++++ b/webview/assets/copy-to-clipboard-HROK9-1F.js
+@@ -1,17 +1,50 @@
++function n(e, t) {
++  let n = t ?? document,
++    r = n.createElement(`textarea`),
++    i = n.activeElement,
++    o = n.getSelection?.(),
++    l = [];
++  if (o) for (let e = 0; e < o.rangeCount; e += 1) l.push(o.getRangeAt(e));
++  ((r.value = e),
++    r.setAttribute(`readonly`, ``),
++    (r.style.position = `fixed`),
++    (r.style.top = `-1000px`),
++    (r.style.left = `-1000px`),
++    (r.style.opacity = `0`),
++    n.body.appendChild(r),
++    r.focus(),
++    r.select());
++  try {
++    return n.execCommand(`copy`);
++  } catch {
++    return !1;
++  } finally {
++    if ((n.body.removeChild(r), o)) {
++      o.removeAllRanges();
++      for (let e of l) o.addRange(e);
++    }
++    i?.focus?.();
++  }
++}
+ function e(e, t) {
+-  let { navigator: n } = t?.target?.ownerDocument?.defaultView ?? window;
++  let r = t?.target?.ownerDocument?.defaultView ?? window,
++    { navigator: i, document: o } = r,
++    l = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
+   return new Promise((t, r) => {
+-    if (!n?.clipboard) {
+-      r();
++    let c = () => {
++      n(l, o) ? t(!0) : r();
++    };
++    if (!i?.clipboard) {
++      c();
+       return;
+     }
+     try {
+       if (
+         typeof e != `string` &&
+-        `write` in n.clipboard &&
++        `write` in i.clipboard &&
+         `supports` in ClipboardItem
+       ) {
+-        let i = new ClipboardItem(
++        let n = new ClipboardItem(
+           Object.fromEntries(
+             Object.entries(e).map(([e, t]) => [
+               e,
+@@ -19,23 +52,10 @@
+             ]),
+           ),
+         );
+-        n.clipboard.write([i]).then(
+-          () => t(!0),
+-          () => {
+-            r();
+-          },
+-        );
+-      } else {
+-        let i = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
+-        n.clipboard.writeText(i).then(
+-          () => t(!0),
+-          () => {
+-            r();
+-          },
+-        );
+-      }
++        i.clipboard.write([n]).then(() => t(!0), c);
++      } else i.clipboard.writeText(l).then(() => t(!0), c);
+     } catch {
+-      r();
++      c();
+     }
+   });
+ }
+--- a/webview/assets/local-conversation-thread-Dki9vHa8.js
++++ b/webview/assets/local-conversation-thread-Dki9vHa8.js
+@@ -19405 +19405 @@
+-        navigator.clipboard.writeText(e).then(() => {
++        Jo(e).then(() => {
+@@ -19534 +19534 @@
+-                navigator.clipboard.writeText(D);
++                Jo(D);
+@@ -19583 +19583 @@
+-        navigator.clipboard.writeText(a);
++        Jo(a);
