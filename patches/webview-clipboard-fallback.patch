@@ -1,6 +1,6 @@
 --- a/webview/assets/copy-to-clipboard-HROK9-1F.js
 +++ b/webview/assets/copy-to-clipboard-HROK9-1F.js
-@@ -1,17 +1,50 @@
+@@ -1,17 +1,64 @@
 +function n(e, t) {
 +  let n = t ?? document,
 +    r = n.createElement(`textarea`),
@@ -29,26 +29,41 @@
 +    i?.focus?.();
 +  }
 +}
++function i(e, t) {
++  let n = t?.clipboardData;
++  if (n == null) return !1;
++  if (typeof e == `string`) n.setData(`text/plain`, e);
++  else
++    for (let [e, t] of Object.entries(e))
++      typeof t == `string` && n.setData(e, t);
++  t.preventDefault?.();
++  return !0;
++}
  function e(e, t) {
 -  let { navigator: n } = t?.target?.ownerDocument?.defaultView ?? window;
-+  let r = t?.target?.ownerDocument?.defaultView ?? window,
-+    { navigator: i, document: o } = r,
-+    l = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
-   return new Promise((t, r) => {
+-  return new Promise((t, r) => {
 -    if (!n?.clipboard) {
 -      r();
-+    let c = () => {
-+      n(l, o) ? t(!0) : r();
-+    };
-+    if (!i?.clipboard) {
-+      c();
++  let r = t?.target?.ownerDocument?.defaultView ?? window,
++    { navigator: a, document: o } = r,
++    l = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
++  return new Promise((s, c) => {
++    if (i(e, t)) {
++      s(!0);
        return;
      }
++    let d = () => {
++      n(l, o) ? s(!0) : c();
++    };
++    if (!r.isSecureContext || !a?.clipboard) {
++      d();
++      return;
++    }
      try {
        if (
          typeof e != `string` &&
 -        `write` in n.clipboard &&
-+        `write` in i.clipboard &&
++        `write` in a.clipboard &&
          `supports` in ClipboardItem
        ) {
 -        let i = new ClipboardItem(
@@ -56,7 +71,7 @@
            Object.fromEntries(
              Object.entries(e).map(([e, t]) => [
                e,
-@@ -19,23 +52,10 @@
+@@ -19,23 +66,10 @@
              ]),
            ),
          );
@@ -75,11 +90,11 @@
 -          },
 -        );
 -      }
-+        i.clipboard.write([n]).then(() => t(!0), c);
-+      } else i.clipboard.writeText(l).then(() => t(!0), c);
++        a.clipboard.write([n]).then(() => s(!0), d);
++      } else a.clipboard.writeText(l).then(() => s(!0), d);
      } catch {
 -      r();
-+      c();
++      d();
      }
    });
  }
