@@ -119,6 +119,10 @@ function compareWorkspaceDirectoryEntries(
 
 type IpcMainBridgeState = {
   broadcastToRenderer?: (message: MainToRendererMessage) => void;
+  sendToRendererWebContents?: (
+    webContentsId: number,
+    message: MainToRendererMessage,
+  ) => void;
   handleRendererInvoke?: (
     channel: string,
     args: unknown[],
@@ -130,6 +134,8 @@ type IpcMainBridgeState = {
     sender?: RendererWebContentsBridge,
   ) => void;
 };
+
+const DEFAULT_RENDERER_WEB_CONTENTS_ID = 1001;
 
 type RendererWebContentsBridge = {
   id: number;
@@ -303,8 +309,19 @@ function createEmitter(): {
   return api;
 }
 
+function sendIpcMessage(
+  socket: WebSocket,
+  message: MainToRendererMessage,
+): void {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  socket.send(JSON.stringify(message));
+}
+
 function createRendererWebContentsBridge(
   socket: WebSocket,
+  webContentsId = DEFAULT_RENDERER_WEB_CONTENTS_ID,
 ): RendererWebContentsBridge {
   const emitter = createEmitter();
   const mainFrame = { url: "http://localhost:5175/" };
@@ -318,7 +335,7 @@ function createRendererWebContentsBridge(
   return {
     // Upstream Electron code keys trust and host context off the registered
     // window webContents id. Keep this stable while routing sends per socket.
-    id: 1001,
+    id: webContentsId,
     mainFrame,
     isDestroyed: () => destroyed || socket.readyState !== WebSocket.OPEN,
     addListener: emitter.addListener,
@@ -327,15 +344,12 @@ function createRendererWebContentsBridge(
     off: emitter.off,
     removeListener: emitter.removeListener,
     send(channel: string, ...args: unknown[]): void {
-      if (socket.readyState !== WebSocket.OPEN) {
-        return;
-      }
       const payload: MainToRendererMessage = {
         type: "ipc-main-event",
         channel,
         args,
       };
-      socket.send(JSON.stringify(payload));
+      sendIpcMessage(socket, payload);
     },
   };
 }
@@ -678,6 +692,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     },
   });
   const sockets = new Set<WebSocket>();
+  const rendererSocketsByWebContentsId = new Map<number, WebSocket>();
   const configuredPassword = process.env.CODEX_WEB_PASSWORD?.trim() || null;
   const accessLogEnabled = process.env.CODEX_WEB_ACCESS_LOG === "1";
   const expectedAuthToken = configuredPassword
@@ -858,20 +873,42 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   });
 
   bridgeState.broadcastToRenderer = (message: MainToRendererMessage): void => {
-    const payload = JSON.stringify(message);
     for (const socket of sockets) {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(payload);
-      }
+      sendIpcMessage(socket, message);
     }
+  };
+
+  bridgeState.sendToRendererWebContents = (
+    webContentsId: number,
+    message: MainToRendererMessage,
+  ): void => {
+    const socket = rendererSocketsByWebContentsId.get(webContentsId);
+    if (!socket) {
+      return;
+    }
+    sendIpcMessage(socket, message);
   };
 
   websocketServer.on("connection", (socket) => {
     const rendererWebContents = createRendererWebContentsBridge(socket);
+    const previousSocket = rendererSocketsByWebContentsId.get(
+      rendererWebContents.id,
+    );
+    if (previousSocket && previousSocket !== socket && accessLogEnabled) {
+      console.log(
+        `[ws] renderer webContents ${rendererWebContents.id} superseded`,
+      );
+    }
+    rendererSocketsByWebContentsId.set(rendererWebContents.id, socket);
     sockets.add(socket);
 
     socket.on("close", () => {
       sockets.delete(socket);
+      if (
+        rendererSocketsByWebContentsId.get(rendererWebContents.id) === socket
+      ) {
+        rendererSocketsByWebContentsId.delete(rendererWebContents.id);
+      }
     });
 
     socket.on("message", (rawData) => {
@@ -902,9 +939,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
               ok: true,
               result,
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            sendIpcMessage(socket, payload);
           })
           .catch((error) => {
             const payload: MainToRendererMessage = {
@@ -913,9 +948,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
               ok: false,
               errorMessage: errorMessage(error),
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            sendIpcMessage(socket, payload);
           });
         return;
       }
@@ -941,9 +974,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
               ok: true,
               result,
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            sendIpcMessage(socket, payload);
           })
           .catch((error) => {
             const payload: MainToRendererMessage = {
@@ -952,9 +983,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
               ok: false,
               errorMessage: errorMessage(error),
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            sendIpcMessage(socket, payload);
           });
       }
     });
