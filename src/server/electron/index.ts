@@ -30,6 +30,14 @@ type IpcMainBridgeState = {
     channel: string;
     args: unknown[];
   }) => void;
+  sendToRendererWebContents?: (
+    webContentsId: number,
+    message: {
+      type: "ipc-main-event";
+      channel: string;
+      args: unknown[];
+    },
+  ) => void;
   handleRendererInvoke?: (
     channel: string,
     args: unknown[],
@@ -172,7 +180,7 @@ const rendererWebContents: StubWebContents = {
   once: rendererWebContentsEmitter.once,
   removeListener: rendererWebContentsEmitter.removeListener,
   send: (channel: string, ...args: unknown[]): void => {
-    getIpcMainBridgeState().broadcastToRenderer?.({
+    getIpcMainBridgeState().sendToRendererWebContents?.(1001, {
       type: "ipc-main-event",
       channel,
       args,
@@ -374,11 +382,14 @@ class BrowserWindow {
             return;
           }
           const [channel, ...args] = sendArgs as [string, ...unknown[]];
-          getIpcMainBridgeState().broadcastToRenderer?.({
-            type: "ipc-main-event",
-            channel,
-            args,
-          });
+          getIpcMainBridgeState().sendToRendererWebContents?.(
+            this.id * 1000 + 1,
+            {
+              type: "ipc-main-event",
+              channel,
+              args,
+            },
+          );
         },
       } as Record<string, unknown>,
       {
