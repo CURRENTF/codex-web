@@ -121,6 +121,12 @@ type ScheduledFakeUserPromptAck = {
   errorMessage?: string;
 };
 
+type PendingRequest<T> = {
+  reject: (reason?: unknown) => void;
+  resolve: (value: T) => void;
+  socket: WebSocket | null;
+};
+
 declare global {
   interface Window {
     __ELECTRON_SHIM__?: ElectronShimState;
@@ -137,19 +143,10 @@ let requestCounter = 0;
 let socket: WebSocket | null = null;
 let reconnectTimeoutId: number | null = null;
 const outboundQueue: RendererToMainMessage[] = [];
-const pendingInvokes = new Map<
-  string,
-  {
-    reject: (reason?: unknown) => void;
-    resolve: (value: unknown) => void;
-  }
->();
+const pendingInvokes = new Map<string, PendingRequest<unknown>>();
 const pendingDirectoryEntries = new Map<
   string,
-  {
-    reject: (reason?: unknown) => void;
-    resolve: (value: WorkspaceDirectoryEntries) => void;
-  }
+  PendingRequest<WorkspaceDirectoryEntries>
 >();
 const rendererListeners = new Map<string, Set<IpcListener>>();
 
@@ -253,12 +250,81 @@ function handleIncomingMessage(message: MainToRendererMessage): void {
   }
 }
 
-function flushOutboundQueue(): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
+function markMessageSent(
+  message: RendererToMainMessage,
+  sentSocket: WebSocket,
+): void {
+  if (message.type === "ipc-renderer-invoke") {
+    const pending = pendingInvokes.get(message.requestId);
+    if (pending) {
+      pending.socket = sentSocket;
+    }
     return;
   }
-  for (const message of outboundQueue.splice(0)) {
-    socket.send(JSON.stringify(message));
+
+  if (message.type === "workspace-directory-entries-request") {
+    const pending = pendingDirectoryEntries.get(message.requestId);
+    if (pending) {
+      pending.socket = sentSocket;
+    }
+  }
+}
+
+function rejectPendingRequestsForSocket(
+  closedSocket: WebSocket,
+  reason: Error,
+): void {
+  for (const [requestId, pending] of pendingInvokes) {
+    if (pending.socket !== closedSocket) {
+      continue;
+    }
+    pendingInvokes.delete(requestId);
+    pending.reject(reason);
+  }
+
+  for (const [requestId, pending] of pendingDirectoryEntries) {
+    if (pending.socket !== closedSocket) {
+      continue;
+    }
+    pendingDirectoryEntries.delete(requestId);
+    pending.reject(reason);
+  }
+}
+
+function flushOutboundQueue(): void {
+  const activeSocket = socket;
+  if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  while (outboundQueue.length > 0) {
+    const message = outboundQueue[0];
+    if (!message) {
+      return;
+    }
+
+    try {
+      activeSocket.send(JSON.stringify(message));
+    } catch (error) {
+      console.error("[electron-stub] failed to send IPC bridge message", error);
+      try {
+        activeSocket.close();
+      } catch {
+        // Ignore close failures; the reconnect path below will recover.
+      }
+      if (socket === activeSocket) {
+        socket = null;
+      }
+      rejectPendingRequestsForSocket(
+        activeSocket,
+        new Error("[electron-stub] IPC bridge disconnected"),
+      );
+      scheduleReconnect();
+      return;
+    }
+
+    outboundQueue.shift();
+    markMessageSent(message, activeSocket);
   }
 }
 
@@ -281,13 +347,14 @@ function ensureSocket(): void {
     return;
   }
 
-  socket = new WebSocket(
+  const nextSocket = new WebSocket(
     `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/__backend/ipc`,
   );
-  socket.addEventListener("open", () => {
+  socket = nextSocket;
+  nextSocket.addEventListener("open", () => {
     flushOutboundQueue();
   });
-  socket.addEventListener("message", (event) => {
+  nextSocket.addEventListener("message", (event) => {
     try {
       const message = JSON.parse(String(event.data)) as MainToRendererMessage;
       handleIncomingMessage(message);
@@ -298,10 +365,17 @@ function ensureSocket(): void {
       );
     }
   });
-  socket.addEventListener("close", () => {
+  nextSocket.addEventListener("close", () => {
+    rejectPendingRequestsForSocket(
+      nextSocket,
+      new Error("[electron-stub] IPC bridge disconnected"),
+    );
+    if (socket === nextSocket) {
+      socket = null;
+    }
     scheduleReconnect();
   });
-  socket.addEventListener("error", () => {
+  nextSocket.addEventListener("error", () => {
     scheduleReconnect();
   });
 }
@@ -323,7 +397,7 @@ function nextRequestId(): string {
 function invokeMain(channel: string, args: unknown[]): Promise<unknown> {
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
-    pendingInvokes.set(requestId, { resolve, reject });
+    pendingInvokes.set(requestId, { resolve, reject, socket: null });
     enqueueMessage({
       type: "ipc-renderer-invoke",
       requestId,
@@ -379,7 +453,7 @@ function requestWorkspaceDirectoryEntries(
 ): Promise<WorkspaceDirectoryEntries> {
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
-    pendingDirectoryEntries.set(requestId, { resolve, reject });
+    pendingDirectoryEntries.set(requestId, { resolve, reject, socket: null });
     enqueueMessage({
       type: "workspace-directory-entries-request",
       requestId,
@@ -433,7 +507,8 @@ const electronShim = (window.__ELECTRON_SHIM__ ??= {});
 
 electronShim.overrideAdapter = {
   getGateOverride(e) {
-    if (e.name === "2929582856") { // codex_app_sunset
+    if (e.name === "2929582856") {
+      // codex_app_sunset
       return {
         ...e,
         value: false,

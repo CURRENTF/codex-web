@@ -177,6 +177,12 @@ type RendererWebContentsBridge = {
   send: (channel: string, ...args: unknown[]) => void;
 };
 
+type RendererWebContentsBridgeRouter = {
+  createBridgeForSocket: (socket: WebSocket) => RendererWebContentsBridge;
+};
+
+const RENDERER_REATTACH_GRACE_MS = 2_000;
+
 let cachedWebviewIndexHtml: string | null = null;
 const browserAssetCache = new Map<string, string>();
 const browserAssetVersion = Date.now().toString(36);
@@ -430,39 +436,101 @@ function createEmitter(): {
   return api;
 }
 
-function createRendererWebContentsBridge(
-  socket: WebSocket,
-): RendererWebContentsBridge {
-  const emitter = createEmitter();
-  const mainFrame = { url: "http://localhost:5175/" };
-  let destroyed = false;
+function createRendererWebContentsBridgeRouter(): RendererWebContentsBridgeRouter {
+  const openSockets = new Set<WebSocket>();
+  const socketOrder: WebSocket[] = [];
 
-  socket.once("close", () => {
-    destroyed = true;
-    emitter.emit("destroyed");
-  });
+  function pruneClosedSockets(): void {
+    for (let index = socketOrder.length - 1; index >= 0; index -= 1) {
+      const socket = socketOrder[index];
+      if (socket && openSockets.has(socket)) {
+        continue;
+      }
+      socketOrder.splice(index, 1);
+    }
+  }
+
+  function getOpenSocket(preferredSocket?: WebSocket): WebSocket | null {
+    if (
+      preferredSocket &&
+      openSockets.has(preferredSocket) &&
+      preferredSocket.readyState === WebSocket.OPEN
+    ) {
+      return preferredSocket;
+    }
+
+    for (let index = socketOrder.length - 1; index >= 0; index -= 1) {
+      const socket = socketOrder[index];
+      if (socket?.readyState === WebSocket.OPEN && openSockets.has(socket)) {
+        return socket;
+      }
+    }
+
+    return null;
+  }
+
+  function attachSocket(socket: WebSocket): void {
+    openSockets.add(socket);
+    socketOrder.push(socket);
+    socket.once("close", () => {
+      openSockets.delete(socket);
+      pruneClosedSockets();
+    });
+  }
+
+  function sendToSocket(
+    socket: WebSocket,
+    message: MainToRendererMessage,
+  ): void {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify(message));
+  }
 
   return {
-    // Upstream Electron code keys trust and host context off the registered
-    // window webContents id. Keep this stable while routing sends per socket.
-    id: 1001,
-    mainFrame,
-    isDestroyed: () => destroyed || socket.readyState !== WebSocket.OPEN,
-    addListener: emitter.addListener,
-    on: emitter.on,
-    once: emitter.once,
-    off: emitter.off,
-    removeListener: emitter.removeListener,
-    send(channel: string, ...args: unknown[]): void {
-      if (socket.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      const payload: MainToRendererMessage = {
-        type: "ipc-main-event",
-        channel,
-        args,
+    createBridgeForSocket(socket: WebSocket): RendererWebContentsBridge {
+      const emitter = createEmitter();
+      const mainFrame = { url: "http://localhost:5175/" };
+      let destroyed = false;
+
+      attachSocket(socket);
+      socket.once("close", () => {
+        setTimeout(() => {
+          if (getOpenSocket()) {
+            return;
+          }
+          destroyed = true;
+          emitter.emit("destroyed");
+        }, RENDERER_REATTACH_GRACE_MS);
+      });
+
+      return {
+        // Upstream Electron code keys trust and host context off the registered
+        // window webContents id. Keep this stable while routing sends per socket.
+        id: 1001,
+        mainFrame,
+        isDestroyed: () => destroyed,
+        addListener: emitter.addListener,
+        on: emitter.on,
+        once: emitter.once,
+        off: emitter.off,
+        removeListener: emitter.removeListener,
+        send(channel: string, ...args: unknown[]): void {
+          if (destroyed) {
+            return;
+          }
+          const targetSocket = getOpenSocket(socket);
+          if (!targetSocket) {
+            return;
+          }
+          sendToSocket(targetSocket, {
+            type: "ipc-main-event",
+            channel,
+            args,
+          });
+        },
       };
-      socket.send(JSON.stringify(payload));
     },
   };
 }
@@ -805,6 +873,8 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     },
   });
   const sockets = new Set<WebSocket>();
+  const rendererWebContentsBridgeRouter =
+    createRendererWebContentsBridgeRouter();
   const configuredPassword = process.env.CODEX_WEB_PASSWORD?.trim() || null;
   const accessLogEnabled = process.env.CODEX_WEB_ACCESS_LOG === "1";
   const expectedAuthToken = configuredPassword
@@ -1152,7 +1222,8 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   };
 
   websocketServer.on("connection", (socket) => {
-    const rendererWebContents = createRendererWebContentsBridge(socket);
+    const rendererWebContents =
+      rendererWebContentsBridgeRouter.createBridgeForSocket(socket);
     sockets.add(socket);
 
     socket.on("close", () => {
