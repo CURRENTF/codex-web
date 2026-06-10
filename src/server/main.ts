@@ -1279,11 +1279,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           return;
         }
 
-        bridgeState.handleRendererSend?.(
-          message.channel,
-          message.args,
-          rendererWebContents,
-        );
+        bridgeState.handleRendererSend?.(message.channel, message.args);
         return;
       }
 
@@ -1318,11 +1314,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       if (message.type === "ipc-renderer-invoke") {
         const { channel, requestId, args } = message;
         Promise.resolve(
-          bridgeState.handleRendererInvoke?.(
-            channel,
-            args,
-            rendererWebContents,
-          ) ??
+          bridgeState.handleRendererInvoke?.(channel, args) ??
             Promise.reject(
               new Error(
                 `[ipc-bridge] no ipcMain.handle for channel ${channel}`,
