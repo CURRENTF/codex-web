@@ -1,0 +1,10 @@
+--- a/webview/assets/app-main-Dsg36Y4q.js
++++ b/webview/assets/app-main-Dsg36Y4q.js
+@@ -28029,6 +28029,7 @@
+     N;
+   t[42] === Symbol.for(`react.memo_cache_sentinel`)
+     ? ((N = {
++        overrideAdapter: window.__ELECTRON_SHIM__.overrideAdapter,
+         networkConfig: {
+           api: Gk,
+           logEventUrl: gk,
