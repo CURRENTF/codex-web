@@ -1,0 +1,71 @@
+--- a/webview/assets/composer-CL8HPtlL.js
++++ b/webview/assets/composer-CL8HPtlL.js
+@@ -68891,6 +68891,68 @@
+       }
+     },
+     bs = Ws(ys),
++    codexWebScheduledFakeUserPromptEffect = (0, $.useEffect)(() => {
++      if (K == null) return;
++      let e = !1,
++        t = !1,
++        n = () => {
++          if (t || e) return;
++          let r = window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPTS__;
++          if (!Array.isArray(r)) return;
++          let i = r.find(
++            (e) =>
++              e &&
++              typeof e.id === `string` &&
++              e.conversationId === K &&
++              typeof e.prompt === `string` &&
++              e.prompt.trim().length > 0 &&
++              (e.status == null || e.status === `pending`),
++          );
++          if (!i) return;
++          ((e = !0),
++            (i.status = `submitting`),
++            window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__?.({
++              id: i.id,
++              status: `accepted`,
++            }),
++            bs({
++              followUpSubmitAction: `steer`,
++              promptRawOverride: i.prompt,
++              skipGoalReplacementConfirmation: !0,
++            })
++              .then(() => {
++                let e = r.indexOf(i);
++                (e >= 0 && r.splice(e, 1),
++                  window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__?.({
++                    id: i.id,
++                    status: `sent`,
++                  }));
++              })
++              .catch((e) => {
++                ((i.status = `failed`),
++                  window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__?.({
++                    id: i.id,
++                    status: `failed`,
++                    errorMessage: e instanceof Error ? e.message : String(e),
++                  }));
++              })
++              .finally(() => {
++                ((e = !1), n());
++              }));
++        };
++      (n(),
++        window.addEventListener(
++          `codex-web-scheduled-fake-user-prompt`,
++          n,
++        ));
++      return () => {
++        (t = !0),
++          window.removeEventListener(
++            `codex-web-scheduled-fake-user-prompt`,
++            n,
++          );
++      };
++    }, [K, bs]),
+     xs = Ws(() => {
+       if (bt == null) return;
+       let { followUpSubmitAction: e, objective: t } = bt;

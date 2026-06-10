@@ -1,4 +1,5 @@
 import {
+  dispatchNavigateToRoute,
   mapBrowserPathToInitialRoute,
   mapMemoryPathToBrowserPath,
 } from "./routes";
@@ -31,6 +32,13 @@ type RendererToMainMessage =
       requestId: string;
       directoryPath: string | null;
       directoriesOnly: boolean;
+    }
+  | {
+      type: "codex-web-route-state";
+      browserPath: string;
+      memoryPath: string;
+      conversationId: string | null;
+      sourceUrl: string;
     };
 
 type MainToRendererMessage =
@@ -85,9 +93,29 @@ type ElectronShimState = {
   onMemoryNavigationChanged?: (navigation: MemoryNavigationChange) => void;
 };
 
+type ScheduledFakeUserPrompt = {
+  id: string;
+  conversationId: string;
+  prompt: string;
+  dueAtMs: number;
+  createdAtMs: number;
+  attempts?: number;
+  status?: "pending" | "submitting" | "failed";
+};
+
+type ScheduledFakeUserPromptAck = {
+  id: string;
+  status: "accepted" | "sent" | "failed";
+  errorMessage?: string;
+};
+
 declare global {
   interface Window {
     __ELECTRON_SHIM__?: ElectronShimState;
+    __CODEX_WEB_SCHEDULED_FAKE_USER_PROMPTS__?: ScheduledFakeUserPrompt[];
+    __CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__?: (
+      ack: ScheduledFakeUserPromptAck,
+    ) => void;
   }
 }
 
@@ -129,8 +157,58 @@ export function emitRendererEvent(channel: string, args: unknown[]): void {
   }
 }
 
+function getScheduledFakeUserPrompts(): ScheduledFakeUserPrompt[] {
+  return (window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPTS__ ??= []);
+}
+
+function isScheduledFakeUserPrompt(
+  value: unknown,
+): value is ScheduledFakeUserPrompt {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const prompt = value as Record<string, unknown>;
+  return (
+    typeof prompt.id === "string" &&
+    typeof prompt.conversationId === "string" &&
+    typeof prompt.prompt === "string" &&
+    typeof prompt.dueAtMs === "number" &&
+    typeof prompt.createdAtMs === "number"
+  );
+}
+
+function emitScheduledFakeUserPromptAvailable(): void {
+  window.dispatchEvent(new CustomEvent("codex-web-scheduled-fake-user-prompt"));
+}
+
+function storeScheduledFakeUserPrompt(value: unknown): void {
+  if (!isScheduledFakeUserPrompt(value)) {
+    console.warn("[codex-web] invalid scheduled fake-user prompt", value);
+    return;
+  }
+
+  const prompts = getScheduledFakeUserPrompts();
+  const existing = prompts.find((prompt) => prompt.id === value.id);
+  if (!existing) {
+    prompts.push({ ...value, status: "pending" });
+  } else if (existing.status !== "submitting") {
+    Object.assign(existing, value, { status: existing.status ?? "pending" });
+  }
+
+  dispatchNavigateToRoute(`/local/${value.conversationId}`);
+  emitScheduledFakeUserPromptAvailable();
+  window.setTimeout(emitScheduledFakeUserPromptAvailable, 250);
+  window.setTimeout(emitScheduledFakeUserPromptAvailable, 1_000);
+}
+
 function handleIncomingMessage(message: MainToRendererMessage): void {
   if (message.type === "ipc-main-event") {
+    if (message.channel === "codex_web:scheduled-fake-user-prompt") {
+      storeScheduledFakeUserPrompt(message.args[0]);
+      return;
+    }
+
     emitRendererEvent(message.channel, message.args);
     return;
   }
@@ -217,7 +295,10 @@ function ensureSocket(): void {
 }
 
 function enqueueMessage(message: RendererToMainMessage): void {
-  outboundQueue.push(message);
+  outboundQueue.push({
+    ...message,
+    sourceUrl: window.location.href,
+  } as RendererToMainMessage);
   ensureSocket();
   flushOutboundQueue();
 }
@@ -296,6 +377,43 @@ function requestWorkspaceDirectoryEntries(
   });
 }
 
+function conversationIdForMemoryPath(memoryPath: string): string | null {
+  const match = memoryPath.match(/^\/local\/([^/?#]+)$/);
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(match[1]!);
+  } catch {
+    return match[1]!;
+  }
+}
+
+function currentBrowserPath(): string {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function reportRouteState(memoryPath: string): void {
+  enqueueMessage({
+    type: "codex-web-route-state",
+    browserPath: currentBrowserPath(),
+    memoryPath,
+    conversationId: conversationIdForMemoryPath(memoryPath),
+    sourceUrl: window.location.href,
+  });
+}
+
+window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__ = (
+  ack: ScheduledFakeUserPromptAck,
+) => {
+  enqueueMessage({
+    type: "ipc-renderer-send",
+    channel: "codex_web:scheduled-fake-user-prompt-result",
+    args: [ack],
+  });
+};
+
 const themeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
 const mobileMediaQuery = matchMedia("(max-width: 768px)");
 const initialSidebarState = !mobileMediaQuery.matches;
@@ -306,6 +424,7 @@ const initialRoute = mapBrowserPathToInitialRoute(
   window.location.search,
 );
 electronShim.initialRoute = initialRoute.memoryPath;
+reportRouteState(initialRoute.memoryPath);
 
 if (initialRoute.browserPath) {
   window.history.pushState(undefined, "", initialRoute.browserPath);
@@ -314,6 +433,7 @@ if (initialRoute.browserPath) {
 electronShim.initialSidebarState = initialSidebarState;
 electronShim.onMemoryNavigationChanged = (navigation) => {
   const path = navigation.location.pathname;
+  reportRouteState(path);
   if (
     navigation.action !== "POP" &&
     mobileMediaQuery.matches &&
