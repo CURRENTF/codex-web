@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The upstream Codex app bundle is unpacked from a desktop build. On Linux
+# remotes, scratch/asar/node_modules/node-pty may contain a native module for a
+# different platform. The terminal panel needs a Linux-built node-pty.
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_USE_CLASH_PROXY:=1}"
+: "${CODEX_WEB_HTTP_PROXY:=http://127.0.0.1:7890}"
+: "${CODEX_WEB_HTTPS_PROXY:=$CODEX_WEB_HTTP_PROXY}"
+: "${CODEX_WEB_ALL_PROXY:=socks5://127.0.0.1:7891}"
+: "${CODEX_WEB_NO_PROXY:=localhost,127.0.0.1,::1}"
+: "${CODEX_WEB_NODE_PTY_BUILD_ROOT:=/root/autodl-tmp/codex-web-node-pty-build}"
+
+NODE_PTY_DIR="$CODEX_WEB_REPO_DIR/scratch/asar/node_modules/node-pty"
+NPM_BIN="$(dirname "$CODEX_WEB_NODE")/npm"
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  exit 0
+fi
+if [[ ! -x "$CODEX_WEB_NODE" ]]; then
+  echo "$(date -Is) missing node: $CODEX_WEB_NODE" >&2
+  exit 1
+fi
+if [[ ! -d "$NODE_PTY_DIR" ]]; then
+  echo "$(date -Is) missing node-pty directory: $NODE_PTY_DIR" >&2
+  exit 1
+fi
+
+export PATH="$(dirname "$CODEX_WEB_NODE"):$PATH"
+if [[ "$CODEX_WEB_USE_CLASH_PROXY" = "1" ]]; then
+  export HTTP_PROXY="$CODEX_WEB_HTTP_PROXY"
+  export HTTPS_PROXY="$CODEX_WEB_HTTPS_PROXY"
+  export ALL_PROXY="$CODEX_WEB_ALL_PROXY"
+  export http_proxy="$CODEX_WEB_HTTP_PROXY"
+  export https_proxy="$CODEX_WEB_HTTPS_PROXY"
+  export all_proxy="$CODEX_WEB_ALL_PROXY"
+  export NO_PROXY="$CODEX_WEB_NO_PROXY"
+  export no_proxy="$CODEX_WEB_NO_PROXY"
+fi
+
+node_pty_smoke() {
+  "$CODEX_WEB_NODE" <<'NODE'
+const pty = require("./scratch/asar/node_modules/node-pty");
+const marker = "codex_web_node_pty_ok";
+const term = pty.spawn("/bin/sh", ["-lc", `printf ${marker}`], {
+  cols: 80,
+  rows: 24,
+  cwd: process.cwd(),
+  env: process.env,
+});
+let output = "";
+term.onData((data) => {
+  output += data;
+});
+term.onExit(() => {
+  process.exit(output.includes(marker) ? 0 : 1);
+});
+setTimeout(() => process.exit(2), 3000);
+NODE
+}
+
+cd "$CODEX_WEB_REPO_DIR"
+if node_pty_smoke >/dev/null 2>&1; then
+  exit 0
+fi
+
+if [[ ! -x "$NPM_BIN" ]]; then
+  echo "$(date -Is) missing npm: $NPM_BIN" >&2
+  exit 1
+fi
+
+version="$("$CODEX_WEB_NODE" -e 'const p=require("./scratch/asar/node_modules/node-pty/package.json"); process.stdout.write(p.version || "1.1.0")')"
+work_dir="$CODEX_WEB_NODE_PTY_BUILD_ROOT"
+
+echo "$(date -Is) rebuilding Linux node-pty@$version for codex-web terminal support"
+rm -rf "$work_dir"
+mkdir -p "$work_dir"
+cd "$work_dir"
+"$NPM_BIN" init -y >/dev/null
+"$NPM_BIN" install "node-pty@$version" --foreground-scripts
+
+cd "$CODEX_WEB_REPO_DIR"
+backup_dir="$NODE_PTY_DIR.bak.$(date +%Y%m%d-%H%M%S)"
+mv "$NODE_PTY_DIR" "$backup_dir"
+cp -a "$work_dir/node_modules/node-pty" "$NODE_PTY_DIR"
+
+if ! node_pty_smoke >/dev/null 2>&1; then
+  rm -rf "$NODE_PTY_DIR"
+  mv "$backup_dir" "$NODE_PTY_DIR"
+  echo "$(date -Is) rebuilt node-pty failed smoke test; restored $backup_dir" >&2
+  exit 1
+fi
+
+echo "$(date -Is) node-pty Linux rebuild installed"

@@ -32,6 +32,8 @@ fi
 : "${CODEX_WEB_PASSWORD:=}"
 : "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
 : "${CODEX_BUFFER_SIZE:=104857600}"
+: "${CODEX_WEB_ENSURE_NODE_PTY:=1}"
+: "${CODEX_WEB_ENSURE_NODE_PTY_SCRIPT:=$CODEX_WEB_REPO_DIR/scripts/codex_web_ensure_node_pty}"
 
 mkdir -p "$CODEX_WEB_LOG_DIR" "$CODEX_WEB_REPO_DIR/logs"
 LOG_FILE="$CODEX_WEB_LOG_DIR/codex-web.log"
@@ -55,6 +57,14 @@ if [[ -z "$CODEX_WEB_PASSWORD" ]]; then
 fi
 
 "${CODEX_WEB_APP_SERVER_START:-/root/.local/bin/codex-web-app-server-start}"
+
+if [[ "$CODEX_WEB_ENSURE_NODE_PTY" = "1" ]]; then
+  if [[ ! -x "$CODEX_WEB_ENSURE_NODE_PTY_SCRIPT" ]]; then
+    echo "$(date -Is) missing node-pty ensure script: $CODEX_WEB_ENSURE_NODE_PTY_SCRIPT" >&2
+    exit 1
+  fi
+  "$CODEX_WEB_ENSURE_NODE_PTY_SCRIPT"
+fi
 
 port_pids() {
   netstat -ltnp 2>/dev/null |

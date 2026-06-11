@@ -141,6 +141,7 @@ Install the scripts on the remote host:
 ```bash
 install -m 700 /root/codex-web/scripts/codex_web_app_server_start /root/.local/bin/codex-web-app-server-start
 install -m 700 /root/codex-web/scripts/codex_web_app_server_proxy /root/.local/bin/codex-web-app-server-proxy
+install -m 700 /root/codex-web/scripts/codex_web_ensure_node_pty /root/.local/bin/codex-web-ensure-node-pty
 install -m 700 /root/codex-web/scripts/codex_web_split_start /root/.local/bin/codex-web-start
 ```
 
@@ -182,13 +183,22 @@ Start or restart only the web side:
 
 The split start script first ensures `/root/.local/bin/codex-web-app-server-start`
 has started a long-lived `codex --yolo app-server` on `CODEX_UNIX_SOCKET`, then
-starts `src/server/main.js` with `CODEX_CLI_PATH` pointed at the proxy wrapper.
+checks that Linux `node-pty` can load from the unpacked app bundle, then starts
+`src/server/main.js` with `CODEX_CLI_PATH` pointed at the proxy wrapper.
 The proxy wrapper uses the Node bridge in
 `scripts/codex_web_app_server_proxy_node.mjs` to forward stdio to the
 app-server's WebSocket-over-Unix-socket transport. Do not replace it with
 `codex app-server proxy --sock`; that command is for the app-server control
 socket and does not complete the codex-web initialize handshake. If the
 app-server is already running, it is reused.
+
+The upstream desktop bundle may unpack a non-Linux `node-pty` native module.
+`scripts/codex_web_ensure_node_pty` is idempotent: on Linux it first smoke-tests
+`scratch/asar/node_modules/node-pty`; if loading or spawning fails, it installs
+the same `node-pty` version in `/root/autodl-tmp/codex-web-node-pty-build`,
+copies the rebuilt package into `scratch/asar/node_modules/node-pty`, and keeps
+a timestamped backup of the previous package. This is required for the web
+terminal panel.
 
 To restart the app-server itself, stop the PID in
 `/root/codex-web/logs/codex-app-server.pid`, then run:
@@ -206,6 +216,7 @@ ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex .*app-server|codex-we
 test -S /tmp/codex-web-app-server.sock
 netstat -ltnp 2>/dev/null | grep ':6006'
 tr '\0' '\n' </proc/$(cat /root/codex-web/logs/codex-app-server.pid)/environ | grep -Ei '^(HTTP|HTTPS|ALL)_PROXY='
+/root/.local/bin/codex-web-ensure-node-pty
 ```
 
 ## Security
