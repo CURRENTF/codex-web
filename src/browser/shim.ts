@@ -645,6 +645,7 @@ export const ipcRenderer = {
           available: false,
           authRequired: false,
         },
+        local_app_server_feature_enablement: {},
         pending_worktrees: [],
         statsig_default_enable_features: {
           enable_request_compression: true,

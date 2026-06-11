@@ -356,8 +356,11 @@ class BrowserWindow {
       {
         ...webContentsEmitter,
         id: this.id * 1000 + 1,
+        mainFrame: rendererMainFrame,
+        isDestroyed: (): boolean => this.destroyed,
         loadURL: async (url: string): Promise<void> => {
           log(`BrowserWindow#${this.id}.webContents.loadURL`, [url]);
+          rendererMainFrame.url = url;
         },
         loadFile: async (...loadFileArgs: unknown[]): Promise<void> => {
           log(`BrowserWindow#${this.id}.webContents.loadFile`, loadFileArgs);

@@ -535,6 +535,33 @@ function createRendererWebContentsBridgeRouter(): RendererWebContentsBridgeRoute
   };
 }
 
+function getRegisteredRendererWebContents(): RendererWebContentsBridge | null {
+  try {
+    const requireFunction = eval("require") as (id: string) => {
+      BrowserWindow?: {
+        getAllWindows?: () => Array<{
+          isDestroyed?: () => boolean;
+          webContents?: RendererWebContentsBridge;
+        }>;
+      };
+    };
+    const electron = requireFunction("electron");
+    const windows = electron.BrowserWindow?.getAllWindows?.() ?? [];
+    for (const window of windows) {
+      if (window.isDestroyed?.() === true) {
+        continue;
+      }
+      if (window.webContents) {
+        return window.webContents;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.stack ?? error.message;
@@ -1222,7 +1249,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   };
 
   websocketServer.on("connection", (socket) => {
-    const rendererWebContents =
+    const socketRendererWebContents =
       rendererWebContentsBridgeRouter.createBridgeForSocket(socket);
     sockets.add(socket);
 
@@ -1244,7 +1271,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
         typeof message.sourceUrl === "string" &&
         message.sourceUrl
       ) {
-        rendererWebContents.mainFrame.url = message.sourceUrl;
+        socketRendererWebContents.mainFrame.url = message.sourceUrl;
       }
 
       if (message.type === "codex-web-route-state") {
@@ -1279,7 +1306,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           return;
         }
 
-        bridgeState.handleRendererSend?.(message.channel, message.args);
+        bridgeState.handleRendererSend?.(
+          message.channel,
+          message.args,
+          getRegisteredRendererWebContents() ?? socketRendererWebContents,
+        );
         return;
       }
 
@@ -1314,7 +1345,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       if (message.type === "ipc-renderer-invoke") {
         const { channel, requestId, args } = message;
         Promise.resolve(
-          bridgeState.handleRendererInvoke?.(channel, args) ??
+          bridgeState.handleRendererInvoke?.(
+            channel,
+            args,
+            getRegisteredRendererWebContents() ?? socketRendererWebContents,
+          ) ??
             Promise.reject(
               new Error(
                 `[ipc-bridge] no ipcMain.handle for channel ${channel}`,
