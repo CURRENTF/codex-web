@@ -129,6 +129,69 @@ ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex app-server' | grep -v
 netstat -ltnp 2>/dev/null | grep ':6006'
 ```
 
+## Split App Server
+
+Observed on 2026-06-11: some SeetaCloud containers have `systemctl --user`
+offline, so the split deployment uses repo-provided shell scripts instead of
+user services. This lets the web server restart independently while the Codex
+app-server keeps running on a Unix socket.
+
+Install the scripts on the remote host:
+
+```bash
+install -m 700 /root/codex-web/scripts/codex_web_app_server_start /root/.local/bin/codex-web-app-server-start
+install -m 700 /root/codex-web/scripts/codex_web_app_server_proxy /root/.local/bin/codex-web-app-server-proxy
+install -m 700 /root/codex-web/scripts/codex_web_split_start /root/.local/bin/codex-web-start
+```
+
+The root-only environment file still keeps secrets outside the repo:
+
+```bash
+cat >/root/.config/codex-web/env <<'EOF'
+CODEX_WEB_REPO_DIR=/root/codex-web
+CODEX_WEB_NODE=/root/node/bin/node
+CODEX_WEB_CODEX=/root/npm-global/bin/codex
+CODEX_WEB_PROXY=/root/.local/bin/codex-web-app-server-proxy
+CODEX_WEB_HOST=0.0.0.0
+CODEX_WEB_PORT=6006
+CODEX_WEB_LOG_DIR=/root/autodl-fs/logs/codex-web
+CODEX_WEB_APP_SERVER_LOG=/root/autodl-fs/logs/codex-web/codex-app-server.log
+CODEX_WEB_APP_SERVER_PID=/root/codex-web/logs/codex-app-server.pid
+CODEX_UNIX_SOCKET=/tmp/codex-web-app-server.sock
+CODEX_HOME=/root/.codex
+CODEX_WEB_PASSWORD='<choose-a-password>'
+EOF
+chmod 600 /root/.config/codex-web/env
+```
+
+Start or restart only the web side:
+
+```bash
+/root/.local/bin/codex-web-start
+```
+
+The split start script first ensures `/root/.local/bin/codex-web-app-server-start`
+has started a long-lived `codex --yolo app-server` on `CODEX_UNIX_SOCKET`, then
+starts `src/server/main.js` with `CODEX_CLI_PATH` pointed at the proxy wrapper.
+If the app-server is already running, it is reused.
+
+To restart the app-server itself, stop the PID in
+`/root/codex-web/logs/codex-app-server.pid`, then run:
+
+```bash
+/root/.local/bin/codex-web-app-server-start
+/root/.local/bin/codex-web-start
+```
+
+Manual verification:
+
+```bash
+curl -fsS http://127.0.0.1:6006/ >/dev/null
+ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex .*app-server|codex-web-app-server-proxy' | grep -v grep
+test -S /tmp/codex-web-app-server.sock
+netstat -ltnp 2>/dev/null | grep ':6006'
+```
+
 ## Security
 
 Do not bind this directly to a public interface without an authentication layer.

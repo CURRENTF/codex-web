@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start codex-web in split mode:
+#   1. ensure a long-lived Codex app-server is running on CODEX_UNIX_SOCKET
+#   2. start only the HTTP/WebSocket web server on CODEX_WEB_PORT
+#
+# A later web-server restart should use this script again; it will reuse the
+# existing app-server instead of spawning one as a child of codex-web.
+
+LOCK_FILE=/tmp/codex-web-start.lock
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "$(date -Is) codex-web start already in progress"
+  exit 0
+fi
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_PROXY:=/root/.local/bin/codex-web-app-server-proxy}"
+: "${CODEX_WEB_HOST:=0.0.0.0}"
+: "${CODEX_WEB_PORT:=6006}"
+: "${CODEX_WEB_LOG_DIR:=/root/autodl-fs/logs/codex-web}"
+: "${CODEX_HOME:=/root/.codex}"
+: "${CODEX_WEB_PASSWORD:=}"
+: "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
+: "${CODEX_BUFFER_SIZE:=104857600}"
+
+mkdir -p "$CODEX_WEB_LOG_DIR" "$CODEX_WEB_REPO_DIR/logs"
+LOG_FILE="$CODEX_WEB_LOG_DIR/codex-web.log"
+PID_FILE="$CODEX_WEB_REPO_DIR/logs/codex-web.pid"
+
+if [[ ! -d "$CODEX_WEB_REPO_DIR" ]]; then
+  echo "$(date -Is) missing repo: $CODEX_WEB_REPO_DIR" >&2
+  exit 1
+fi
+if [[ ! -x "$CODEX_WEB_NODE" ]]; then
+  echo "$(date -Is) missing node: $CODEX_WEB_NODE" >&2
+  exit 1
+fi
+if [[ ! -x "$CODEX_WEB_PROXY" ]]; then
+  echo "$(date -Is) missing proxy: $CODEX_WEB_PROXY" >&2
+  exit 1
+fi
+if [[ -z "$CODEX_WEB_PASSWORD" ]]; then
+  echo "$(date -Is) CODEX_WEB_PASSWORD is empty" >&2
+  exit 1
+fi
+
+"${CODEX_WEB_APP_SERVER_START:-/root/.local/bin/codex-web-app-server-start}"
+
+port_pids() {
+  netstat -ltnp 2>/dev/null |
+    awk -v port=":$CODEX_WEB_PORT" '$4 ~ port { split($7, a, "/"); if (a[1] != "-" && a[1] != "") print a[1] }' |
+    sort -u
+}
+
+is_codex_web_pid() {
+  local pid="$1"
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+
+  local cmd
+  cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"
+  [[ "$cmd" == *"src/server/main.js"* && "$cmd" == *"--port $CODEX_WEB_PORT"* ]]
+}
+
+existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null && is_codex_web_pid "$existing_pid"; then
+  if port_pids | grep -qx "$existing_pid"; then
+    echo "$(date -Is) codex-web already running pid=$existing_pid"
+    exit 0
+  fi
+fi
+
+found_codex_web_pid=""
+for pid in $(port_pids); do
+  if is_codex_web_pid "$pid"; then
+    found_codex_web_pid="$pid"
+    break
+  fi
+done
+if [[ -n "$found_codex_web_pid" ]]; then
+  echo "$found_codex_web_pid" >"$PID_FILE"
+  echo "$(date -Is) codex-web already listening pid=$found_codex_web_pid"
+  exit 0
+fi
+
+other_port_pids="$(port_pids | tr '\n' ' ')"
+if [[ -n "${other_port_pids// }" ]]; then
+  echo "$(date -Is) port $CODEX_WEB_PORT is occupied by: $other_port_pids" >&2
+  exit 1
+fi
+
+if [[ -f "$LOG_FILE" ]]; then
+  log_size="$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)"
+  if [[ "$log_size" -gt 10485760 ]]; then
+    mv "$LOG_FILE" "$LOG_FILE.$(date +%Y%m%d-%H%M%S).bak"
+  fi
+fi
+
+cd "$CODEX_WEB_REPO_DIR"
+export CODEX_HOME CODEX_WEB_PASSWORD CODEX_UNIX_SOCKET CODEX_BUFFER_SIZE
+export CODEX_CLI_PATH="$CODEX_WEB_PROXY"
+export PATH="$(dirname "$CODEX_WEB_NODE"):/root/npm-global/bin:$PATH"
+
+nohup "$CODEX_WEB_NODE" src/server/main.js --host "$CODEX_WEB_HOST" --port "$CODEX_WEB_PORT" \
+  >>"$LOG_FILE" 2>&1 &
+new_pid=$!
+echo "$new_pid" >"$PID_FILE"
+
+for _ in $(seq 1 40); do
+  if kill -0 "$new_pid" 2>/dev/null && port_pids | grep -qx "$new_pid"; then
+    echo "$(date -Is) started codex-web pid=$new_pid host=$CODEX_WEB_HOST port=$CODEX_WEB_PORT"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+if ! kill -0 "$new_pid" 2>/dev/null; then
+  echo "$(date -Is) codex-web exited during startup" >&2
+else
+  echo "$(date -Is) codex-web did not bind port $CODEX_WEB_PORT in time" >&2
+fi
+tail -120 "$LOG_FILE" >&2 || true
+exit 1

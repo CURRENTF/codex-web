@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start only the long-lived Codex app-server used by codex-web split mode.
+# Restarting codex-web should not kill this process, so ongoing web sessions can
+# survive web UI/server updates. This script is intentionally idempotent.
+
+LOCK_FILE=/tmp/codex-web-app-server-start.lock
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "$(date -Is) codex app-server start already in progress"
+  exit 0
+fi
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_CODEX:=/root/npm-global/bin/codex}"
+: "${CODEX_HOME:=/root/.codex}"
+: "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
+: "${CODEX_WEB_APP_SERVER_LOG:=/root/autodl-fs/logs/codex-web/codex-app-server.log}"
+: "${CODEX_WEB_APP_SERVER_PID:=/root/codex-web/logs/codex-app-server.pid}"
+
+mkdir -p \
+  "$(dirname "$CODEX_UNIX_SOCKET")" \
+  "$(dirname "$CODEX_WEB_APP_SERVER_LOG")" \
+  "$(dirname "$CODEX_WEB_APP_SERVER_PID")"
+
+export CODEX_HOME
+export PATH="$(dirname "$CODEX_WEB_NODE"):$(dirname "$CODEX_WEB_CODEX"):$PATH"
+
+is_app_server_pid() {
+  local pid="$1"
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+
+  local cmd
+  cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"
+  [[ "$cmd" == *"codex --yolo app-server"* ]] &&
+    [[ "$cmd" == *"--listen unix://$CODEX_UNIX_SOCKET"* ]]
+}
+
+existing_pid="$(cat "$CODEX_WEB_APP_SERVER_PID" 2>/dev/null || true)"
+if [[ -n "$existing_pid" ]] &&
+  kill -0 "$existing_pid" 2>/dev/null &&
+  is_app_server_pid "$existing_pid" &&
+  [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+  echo "$(date -Is) codex app-server already running pid=$existing_pid socket=$CODEX_UNIX_SOCKET"
+  exit 0
+fi
+
+for pid in $(pgrep -f "codex .*app-server --listen unix://$CODEX_UNIX_SOCKET" || true); do
+  if is_app_server_pid "$pid" && [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+    echo "$pid" >"$CODEX_WEB_APP_SERVER_PID"
+    echo "$(date -Is) codex app-server already running pid=$pid socket=$CODEX_UNIX_SOCKET"
+    exit 0
+  fi
+done
+
+rm -f "$CODEX_UNIX_SOCKET"
+
+if [[ -f "$CODEX_WEB_APP_SERVER_LOG" ]]; then
+  log_size="$(wc -c <"$CODEX_WEB_APP_SERVER_LOG" 2>/dev/null || echo 0)"
+  if [[ "$log_size" -gt 10485760 ]]; then
+    mv "$CODEX_WEB_APP_SERVER_LOG" "$CODEX_WEB_APP_SERVER_LOG.$(date +%Y%m%d-%H%M%S).bak"
+  fi
+fi
+
+# --yolo is intentionally before the app-server subcommand; Codex 0.139.0
+# accepts it as the top-level bypass flag alias used by this deployment.
+nohup "$CODEX_WEB_NODE" "$CODEX_WEB_CODEX" --yolo app-server \
+  --listen "unix://$CODEX_UNIX_SOCKET" \
+  --analytics-default-enabled \
+  >>"$CODEX_WEB_APP_SERVER_LOG" 2>&1 &
+new_pid=$!
+echo "$new_pid" >"$CODEX_WEB_APP_SERVER_PID"
+
+for _ in $(seq 1 80); do
+  if kill -0 "$new_pid" 2>/dev/null && [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+    echo "$(date -Is) started codex app-server pid=$new_pid socket=$CODEX_UNIX_SOCKET"
+    exit 0
+  fi
+  sleep 0.25
+done
+
+if ! kill -0 "$new_pid" 2>/dev/null; then
+  echo "$(date -Is) codex app-server exited during startup" >&2
+else
+  echo "$(date -Is) codex app-server did not create socket $CODEX_UNIX_SOCKET in time" >&2
+fi
+tail -120 "$CODEX_WEB_APP_SERVER_LOG" >&2 || true
+exit 1

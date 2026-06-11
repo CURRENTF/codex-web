@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# CODEX_CLI_PATH points here when codex-web is run in split mode.
+# codex-web still invokes "$CODEX_CLI_PATH app-server ..."; this wrapper keeps
+# that contract while forwarding stdio to a long-lived app-server Unix socket.
+
+if [[ "${1:-}" != "app-server" ]]; then
+  echo "codex_web_app_server_proxy only supports app-server mode" >&2
+  exit 64
+fi
+shift || true
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_CODEX:=/root/npm-global/bin/codex}"
+: "${CODEX_HOME:=/root/.codex}"
+: "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
+
+export CODEX_HOME
+export PATH="$(dirname "$CODEX_WEB_CODEX"):/root/node/bin:$PATH"
+
+exec "$CODEX_WEB_CODEX" app-server proxy --sock "$CODEX_UNIX_SOCKET"
