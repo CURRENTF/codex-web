@@ -71,6 +71,7 @@ fi
 
 # --yolo is intentionally before the app-server subcommand; Codex 0.139.0
 # accepts it as the top-level bypass flag alias used by this deployment.
+exec 9>&-
 nohup "$CODEX_WEB_NODE" "$CODEX_WEB_CODEX" --yolo app-server \
   --listen "unix://$CODEX_UNIX_SOCKET" \
   --analytics-default-enabled \

@@ -109,6 +109,7 @@ export CODEX_HOME CODEX_WEB_PASSWORD CODEX_UNIX_SOCKET CODEX_BUFFER_SIZE
 export CODEX_CLI_PATH="$CODEX_WEB_PROXY"
 export PATH="$(dirname "$CODEX_WEB_NODE"):/root/npm-global/bin:$PATH"
 
+exec 9>&-
 nohup "$CODEX_WEB_NODE" src/server/main.js --host "$CODEX_WEB_HOST" --port "$CODEX_WEB_PORT" \
   >>"$LOG_FILE" 2>&1 &
 new_pid=$!
