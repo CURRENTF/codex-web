@@ -45,6 +45,7 @@ ws.on("open", () => {
 
 ws.on("message", (data) => {
   process.stdout.write(data);
+  process.stdout.write("\n");
 });
 
 ws.on("error", fail);
