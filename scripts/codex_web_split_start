@@ -24,6 +24,7 @@ fi
 : "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
 : "${CODEX_WEB_NODE:=/root/node/bin/node}"
 : "${CODEX_WEB_PROXY:=/root/.local/bin/codex-web-app-server-proxy}"
+: "${CODEX_WEB_APP_SERVER_PROXY_NODE:=$CODEX_WEB_REPO_DIR/scripts/codex_web_app_server_proxy_node.mjs}"
 : "${CODEX_WEB_HOST:=0.0.0.0}"
 : "${CODEX_WEB_PORT:=6006}"
 : "${CODEX_WEB_LOG_DIR:=/root/autodl-fs/logs/codex-web}"
@@ -106,6 +107,7 @@ fi
 
 cd "$CODEX_WEB_REPO_DIR"
 export CODEX_HOME CODEX_WEB_PASSWORD CODEX_UNIX_SOCKET CODEX_BUFFER_SIZE
+export CODEX_WEB_REPO_DIR CODEX_WEB_NODE CODEX_WEB_APP_SERVER_PROXY_NODE
 export CODEX_CLI_PATH="$CODEX_WEB_PROXY"
 export PATH="$(dirname "$CODEX_WEB_NODE"):/root/npm-global/bin:$PATH"
 

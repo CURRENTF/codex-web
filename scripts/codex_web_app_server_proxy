@@ -18,10 +18,13 @@ if [[ -r "$ENV_FILE" ]]; then
 fi
 
 : "${CODEX_WEB_CODEX:=/root/npm-global/bin/codex}"
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
+: "${CODEX_WEB_APP_SERVER_PROXY_NODE:=$CODEX_WEB_REPO_DIR/scripts/codex_web_app_server_proxy_node.mjs}"
 : "${CODEX_HOME:=/root/.codex}"
 : "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
 
 export CODEX_HOME
-export PATH="$(dirname "$CODEX_WEB_CODEX"):/root/node/bin:$PATH"
+export PATH="$(dirname "$CODEX_WEB_NODE"):$(dirname "$CODEX_WEB_CODEX"):$PATH"
 
-exec "$CODEX_WEB_CODEX" app-server proxy --sock "$CODEX_UNIX_SOCKET"
+exec "$CODEX_WEB_NODE" "$CODEX_WEB_APP_SERVER_PROXY_NODE"

@@ -24,6 +24,11 @@ fi
 : "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
 : "${CODEX_WEB_APP_SERVER_LOG:=/root/autodl-fs/logs/codex-web/codex-app-server.log}"
 : "${CODEX_WEB_APP_SERVER_PID:=/root/codex-web/logs/codex-app-server.pid}"
+: "${CODEX_WEB_USE_CLASH_PROXY:=1}"
+: "${CODEX_WEB_HTTP_PROXY:=http://127.0.0.1:7890}"
+: "${CODEX_WEB_HTTPS_PROXY:=$CODEX_WEB_HTTP_PROXY}"
+: "${CODEX_WEB_ALL_PROXY:=socks5://127.0.0.1:7891}"
+: "${CODEX_WEB_NO_PROXY:=localhost,127.0.0.1,::1,$CODEX_UNIX_SOCKET}"
 
 mkdir -p \
   "$(dirname "$CODEX_UNIX_SOCKET")" \
@@ -32,6 +37,17 @@ mkdir -p \
 
 export CODEX_HOME
 export PATH="$(dirname "$CODEX_WEB_NODE"):$(dirname "$CODEX_WEB_CODEX"):$PATH"
+
+if [[ "$CODEX_WEB_USE_CLASH_PROXY" = "1" ]]; then
+  export HTTP_PROXY="$CODEX_WEB_HTTP_PROXY"
+  export HTTPS_PROXY="$CODEX_WEB_HTTPS_PROXY"
+  export ALL_PROXY="$CODEX_WEB_ALL_PROXY"
+  export http_proxy="$CODEX_WEB_HTTP_PROXY"
+  export https_proxy="$CODEX_WEB_HTTPS_PROXY"
+  export all_proxy="$CODEX_WEB_ALL_PROXY"
+  export NO_PROXY="$CODEX_WEB_NO_PROXY"
+  export no_proxy="$CODEX_WEB_NO_PROXY"
+fi
 
 is_app_server_pid() {
   local pid="$1"

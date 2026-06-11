@@ -152,6 +152,7 @@ CODEX_WEB_REPO_DIR=/root/codex-web
 CODEX_WEB_NODE=/root/node/bin/node
 CODEX_WEB_CODEX=/root/npm-global/bin/codex
 CODEX_WEB_PROXY=/root/.local/bin/codex-web-app-server-proxy
+CODEX_WEB_APP_SERVER_PROXY_NODE=/root/codex-web/scripts/codex_web_app_server_proxy_node.mjs
 CODEX_WEB_HOST=0.0.0.0
 CODEX_WEB_PORT=6006
 CODEX_WEB_LOG_DIR=/root/autodl-fs/logs/codex-web
@@ -159,10 +160,19 @@ CODEX_WEB_APP_SERVER_LOG=/root/autodl-fs/logs/codex-web/codex-app-server.log
 CODEX_WEB_APP_SERVER_PID=/root/codex-web/logs/codex-app-server.pid
 CODEX_UNIX_SOCKET=/tmp/codex-web-app-server.sock
 CODEX_HOME=/root/.codex
+CODEX_WEB_USE_CLASH_PROXY=1
+CODEX_WEB_HTTP_PROXY=http://127.0.0.1:7890
+CODEX_WEB_HTTPS_PROXY=http://127.0.0.1:7890
+CODEX_WEB_ALL_PROXY=socks5://127.0.0.1:7891
 CODEX_WEB_PASSWORD='<choose-a-password>'
 EOF
 chmod 600 /root/.config/codex-web/env
 ```
+
+With `CODEX_WEB_USE_CLASH_PROXY=1`, `codex-web-app-server-start` exports both
+upper- and lower-case proxy variables before launching `codex --yolo
+app-server`. Set it to `0` only when the host has direct supported network
+access.
 
 Start or restart only the web side:
 
@@ -173,7 +183,12 @@ Start or restart only the web side:
 The split start script first ensures `/root/.local/bin/codex-web-app-server-start`
 has started a long-lived `codex --yolo app-server` on `CODEX_UNIX_SOCKET`, then
 starts `src/server/main.js` with `CODEX_CLI_PATH` pointed at the proxy wrapper.
-If the app-server is already running, it is reused.
+The proxy wrapper uses the Node bridge in
+`scripts/codex_web_app_server_proxy_node.mjs` to forward stdio to the
+app-server's WebSocket-over-Unix-socket transport. Do not replace it with
+`codex app-server proxy --sock`; that command is for the app-server control
+socket and does not complete the codex-web initialize handshake. If the
+app-server is already running, it is reused.
 
 To restart the app-server itself, stop the PID in
 `/root/codex-web/logs/codex-app-server.pid`, then run:
@@ -190,6 +205,7 @@ curl -fsS http://127.0.0.1:6006/ >/dev/null
 ps -eo pid,ppid,etime,cmd | grep -E 'src/server/main|codex .*app-server|codex-web-app-server-proxy' | grep -v grep
 test -S /tmp/codex-web-app-server.sock
 netstat -ltnp 2>/dev/null | grep ':6006'
+tr '\0' '\n' </proc/$(cat /root/codex-web/logs/codex-app-server.pid)/environ | grep -Ei '^(HTTP|HTTPS|ALL)_PROXY='
 ```
 
 ## Security
