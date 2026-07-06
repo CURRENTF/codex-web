@@ -59,20 +59,103 @@ is_app_server_pid() {
     [[ "$cmd" == *"--listen unix://$CODEX_UNIX_SOCKET"* ]]
 }
 
+pid_parent() {
+  ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+matching_app_server_pids() {
+  for pid in $(pgrep -f "codex .*app-server --listen unix://$CODEX_UNIX_SOCKET" || true); do
+    if is_app_server_pid "$pid"; then
+      echo "$pid"
+    fi
+  done
+}
+
+cleanup_duplicate_app_servers() {
+  local keep_pid="$1"
+  local duplicate_pids=()
+
+  for pid in $(matching_app_server_pids); do
+    if [[ "$pid" = "$keep_pid" ]] || [[ "$(pid_parent "$pid")" = "$keep_pid" ]]; then
+      continue
+    fi
+    duplicate_pids+=("$pid")
+  done
+
+  if [[ "${#duplicate_pids[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  echo "$(date -Is) stopping duplicate codex app-server pids: ${duplicate_pids[*]}"
+  kill "${duplicate_pids[@]}" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    local remaining=()
+    for pid in "${duplicate_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        remaining+=("$pid")
+      fi
+    done
+    if [[ "${#remaining[@]}" -eq 0 ]]; then
+      return
+    fi
+    sleep 0.25
+    duplicate_pids=("${remaining[@]}")
+  done
+
+  kill -9 "${duplicate_pids[@]}" 2>/dev/null || true
+}
+
+stop_app_server_tree() {
+  local pid="$1"
+  local pids=("$pid")
+
+  while IFS= read -r child_pid; do
+    [[ -n "$child_pid" ]] && pids+=("$child_pid")
+  done < <(pgrep -P "$pid" || true)
+
+  kill "${pids[@]}" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    local remaining=()
+    for tree_pid in "${pids[@]}"; do
+      if kill -0 "$tree_pid" 2>/dev/null; then
+        remaining+=("$tree_pid")
+      fi
+    done
+    if [[ "${#remaining[@]}" -eq 0 ]]; then
+      return
+    fi
+    sleep 0.25
+    pids=("${remaining[@]}")
+  done
+
+  kill -9 "${pids[@]}" 2>/dev/null || true
+}
+
 existing_pid="$(cat "$CODEX_WEB_APP_SERVER_PID" 2>/dev/null || true)"
 if [[ -n "$existing_pid" ]] &&
   kill -0 "$existing_pid" 2>/dev/null &&
   is_app_server_pid "$existing_pid" &&
   [[ -S "$CODEX_UNIX_SOCKET" ]]; then
-  echo "$(date -Is) codex app-server already running pid=$existing_pid socket=$CODEX_UNIX_SOCKET"
-  exit 0
+  cleanup_duplicate_app_servers "$existing_pid"
+  if [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+    echo "$(date -Is) codex app-server already running pid=$existing_pid socket=$CODEX_UNIX_SOCKET"
+    exit 0
+  fi
+  echo "$(date -Is) codex app-server socket disappeared after duplicate cleanup; restarting pid=$existing_pid"
+  stop_app_server_tree "$existing_pid"
 fi
 
 for pid in $(pgrep -f "codex .*app-server --listen unix://$CODEX_UNIX_SOCKET" || true); do
-  if is_app_server_pid "$pid" && [[ -S "$CODEX_UNIX_SOCKET" ]]; then
-    echo "$pid" >"$CODEX_WEB_APP_SERVER_PID"
-    echo "$(date -Is) codex app-server already running pid=$pid socket=$CODEX_UNIX_SOCKET"
-    exit 0
+  if is_app_server_pid "$pid" && [[ "$(pid_parent "$pid")" = "1" ]] && [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+    cleanup_duplicate_app_servers "$pid"
+    if [[ -S "$CODEX_UNIX_SOCKET" ]]; then
+      echo "$pid" >"$CODEX_WEB_APP_SERVER_PID"
+      echo "$(date -Is) codex app-server already running pid=$pid socket=$CODEX_UNIX_SOCKET"
+      exit 0
+    fi
+    echo "$(date -Is) codex app-server socket disappeared after duplicate cleanup; restarting pid=$pid"
+    stop_app_server_tree "$pid"
+    break
   fi
 done
 

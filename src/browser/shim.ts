@@ -1,11 +1,19 @@
 import {
-  dispatchNavigateToRoute,
   mapBrowserPathToInitialRoute,
   mapMemoryPathToBrowserPath,
 } from "./routes";
 import {
+  handleGenericCodexFetchMessage,
+  handleGitOriginsMessage,
   handleLocalFilePickerMessage,
+  handlePathsExistMessage,
+  handleSettingsMessage,
+  handleWorkspaceRootControlMessage,
+  isGenericCodexFetchMessage,
+  isGitOriginsMessage,
   isLocalFilePickerMessage,
+  isPathsExistMessage,
+  isSettingsMessage,
 } from "./files";
 import {
   installWorkspaceRootDialog,
@@ -105,22 +113,6 @@ type StatsigGateEvaluation = {
   [key: string]: unknown;
 };
 
-type ScheduledFakeUserPrompt = {
-  id: string;
-  conversationId: string;
-  prompt: string;
-  dueAtMs: number;
-  createdAtMs: number;
-  attempts?: number;
-  status?: "pending" | "submitting" | "failed";
-};
-
-type ScheduledFakeUserPromptAck = {
-  id: string;
-  status: "accepted" | "sent" | "failed";
-  errorMessage?: string;
-};
-
 type PendingRequest<T> = {
   reject: (reason?: unknown) => void;
   resolve: (value: T) => void;
@@ -130,10 +122,6 @@ type PendingRequest<T> = {
 declare global {
   interface Window {
     __ELECTRON_SHIM__?: ElectronShimState;
-    __CODEX_WEB_SCHEDULED_FAKE_USER_PROMPTS__?: ScheduledFakeUserPrompt[];
-    __CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__?: (
-      ack: ScheduledFakeUserPromptAck,
-    ) => void;
   }
 }
 
@@ -149,6 +137,50 @@ const pendingDirectoryEntries = new Map<
   PendingRequest<WorkspaceDirectoryEntries>
 >();
 const rendererListeners = new Map<string, Set<IpcListener>>();
+
+function installDefaultPersistedAtomValues(): void {
+  const defaults: Record<string, unknown> = {
+    "electron:onboarding-override": "app",
+    "electron:onboarding-projectless-completed": true,
+    "electron:onboarding-welcome-pending": false,
+  };
+
+  for (const [key, value] of Object.entries(defaults)) {
+    const storageKey = `codex:persisted-atom:${key}`;
+    if (localStorage.getItem(storageKey) === null) {
+      localStorage.setItem(storageKey, JSON.stringify(value));
+    }
+  }
+}
+
+function installCryptoRandomUUIDFallback(): void {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return;
+  }
+
+  const fallbackRandomUUID = (): `${string}-${string}-${string}-${string}-${string}` => {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto?.getRandomValues?.(bytes);
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    const hex = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+      12,
+      16,
+    )}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+
+  if (globalThis.crypto) {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: fallbackRandomUUID,
+    });
+  }
+}
 
 function unimplemented(method: string): never {
   debugger;
@@ -166,58 +198,8 @@ export function emitRendererEvent(channel: string, args: unknown[]): void {
   }
 }
 
-function getScheduledFakeUserPrompts(): ScheduledFakeUserPrompt[] {
-  return (window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPTS__ ??= []);
-}
-
-function isScheduledFakeUserPrompt(
-  value: unknown,
-): value is ScheduledFakeUserPrompt {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const prompt = value as Record<string, unknown>;
-  return (
-    typeof prompt.id === "string" &&
-    typeof prompt.conversationId === "string" &&
-    typeof prompt.prompt === "string" &&
-    typeof prompt.dueAtMs === "number" &&
-    typeof prompt.createdAtMs === "number"
-  );
-}
-
-function emitScheduledFakeUserPromptAvailable(): void {
-  window.dispatchEvent(new CustomEvent("codex-web-scheduled-fake-user-prompt"));
-}
-
-function storeScheduledFakeUserPrompt(value: unknown): void {
-  if (!isScheduledFakeUserPrompt(value)) {
-    console.warn("[codex-web] invalid scheduled fake-user prompt", value);
-    return;
-  }
-
-  const prompts = getScheduledFakeUserPrompts();
-  const existing = prompts.find((prompt) => prompt.id === value.id);
-  if (!existing) {
-    prompts.push({ ...value, status: "pending" });
-  } else if (existing.status !== "submitting") {
-    Object.assign(existing, value, { status: existing.status ?? "pending" });
-  }
-
-  dispatchNavigateToRoute(`/local/${value.conversationId}`);
-  emitScheduledFakeUserPromptAvailable();
-  window.setTimeout(emitScheduledFakeUserPromptAvailable, 250);
-  window.setTimeout(emitScheduledFakeUserPromptAvailable, 1_000);
-}
-
 function handleIncomingMessage(message: MainToRendererMessage): void {
   if (message.type === "ipc-main-event") {
-    if (message.channel === "codex_web:scheduled-fake-user-prompt") {
-      storeScheduledFakeUserPrompt(message.args[0]);
-      return;
-    }
-
     emitRendererEvent(message.channel, message.args);
     return;
   }
@@ -490,16 +472,6 @@ function reportRouteState(memoryPath: string): void {
   });
 }
 
-window.__CODEX_WEB_SCHEDULED_FAKE_USER_PROMPT_ACK__ = (
-  ack: ScheduledFakeUserPromptAck,
-) => {
-  enqueueMessage({
-    type: "ipc-renderer-send",
-    channel: "codex_web:scheduled-fake-user-prompt-result",
-    args: [ack],
-  });
-};
-
 const themeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
 const mobileMediaQuery = matchMedia("(max-width: 768px)");
 const initialSidebarState = !mobileMediaQuery.matches;
@@ -512,6 +484,14 @@ electronShim.overrideAdapter = {
       return {
         ...e,
         value: false,
+      };
+    }
+
+    if (e.name === "1488233300") {
+      // heartbeat_automation_thread_bridge
+      return {
+        ...e,
+        value: true,
       };
     }
 
@@ -563,13 +543,33 @@ const buildFlavor: "prod" | "dev" | "agent" | string = "prod";
 
 export const ipcRenderer = {
   invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    if (
+      channel.startsWith("codex_desktop:worker:") &&
+      channel.endsWith(":from-view")
+    ) {
+      return Promise.resolve(undefined);
+    }
+
     if (channel === "codex_desktop:message-from-view" && args.length === 1) {
       if (isOpenInBrowserMessage(args[0])) {
         window.open(args[0].url, "_blank", "noopener,noreferrer");
+        return Promise.resolve(undefined);
       }
 
       if (isLocalFilePickerMessage(args[0])) {
         return handleLocalFilePickerMessage(args[0]);
+      }
+
+      if (isPathsExistMessage(args[0])) {
+        return handlePathsExistMessage(args[0]);
+      }
+
+      if (isGitOriginsMessage(args[0])) {
+        return handleGitOriginsMessage(args[0]);
+      }
+
+      if (isSettingsMessage(args[0])) {
+        return handleSettingsMessage(args[0]);
       }
 
       if (isUnhandledAddWorkspaceRootOptionMessage(args[0])) {
@@ -580,9 +580,20 @@ export const ipcRenderer = {
             return undefined;
           }
 
-          return invokeMain(channel, [{ ...args[0], root }]);
+          handleWorkspaceRootControlMessage({ ...args[0], root });
+          return undefined;
         });
       }
+
+      if (handleWorkspaceRootControlMessage(args[0])) {
+        return Promise.resolve(undefined);
+      }
+
+      if (isGenericCodexFetchMessage(args[0])) {
+        return handleGenericCodexFetchMessage(args[0]);
+      }
+
+      return invokeMain(channel, args);
     }
 
     return invokeMain(channel, args);
@@ -617,6 +628,16 @@ export const ipcRenderer = {
       args,
     });
   },
+  postMessage(channel: string, message: unknown, transfer?: unknown[]): void {
+    if (transfer?.length) {
+      console.debug(
+        "[electron-stub] ipcRenderer.postMessage transfer ignored",
+        channel,
+      );
+    }
+
+    this.send(channel, message);
+  },
   sendSync(channel: string, ..._args: unknown[]): unknown {
     if (channel === "codex_desktop:get-sentry-init-options") {
       return {
@@ -630,6 +651,10 @@ export const ipcRenderer = {
 
     if (channel === "codex_desktop:get-build-flavor") {
       return buildFlavor;
+    }
+
+    if (channel === "codex_desktop:get-uses-owl-app-shell") {
+      return false;
     }
 
     if (channel === "codex_desktop:get-shared-object-snapshot") {
@@ -676,6 +701,8 @@ export const ipcRenderer = {
   },
 };
 
+installCryptoRandomUUIDFallback();
+installDefaultPersistedAtomValues();
 ensureSocket();
 
 export const contextBridge = {

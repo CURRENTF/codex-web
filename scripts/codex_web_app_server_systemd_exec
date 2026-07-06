@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Foreground app-server entrypoint for systemd. Keep this separate from the
+# idempotent nohup launcher so systemd owns exactly one process tree.
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_CODEX:=/root/npm-global/bin/codex}"
+: "${CODEX_HOME:=/root/.codex}"
+: "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
+: "${CODEX_WEB_USE_CLASH_PROXY:=1}"
+: "${CODEX_WEB_HTTP_PROXY:=http://127.0.0.1:7890}"
+: "${CODEX_WEB_HTTPS_PROXY:=$CODEX_WEB_HTTP_PROXY}"
+: "${CODEX_WEB_ALL_PROXY:=socks5://127.0.0.1:7891}"
+: "${CODEX_WEB_NO_PROXY:=localhost,127.0.0.1,::1,$CODEX_UNIX_SOCKET}"
+
+if [[ ! -x "$CODEX_WEB_NODE" ]]; then
+  echo "$(date -Is) missing node: $CODEX_WEB_NODE" >&2
+  exit 127
+fi
+if [[ ! -x "$CODEX_WEB_CODEX" ]]; then
+  echo "$(date -Is) missing codex: $CODEX_WEB_CODEX" >&2
+  exit 127
+fi
+
+mkdir -p "$(dirname "$CODEX_UNIX_SOCKET")"
+rm -f "$CODEX_UNIX_SOCKET"
+
+cd "$CODEX_WEB_REPO_DIR"
+export CODEX_HOME
+export PATH="$(dirname "$CODEX_WEB_NODE"):$(dirname "$CODEX_WEB_CODEX"):$PATH"
+
+if [[ "$CODEX_WEB_USE_CLASH_PROXY" = "1" ]]; then
+  export HTTP_PROXY="$CODEX_WEB_HTTP_PROXY"
+  export HTTPS_PROXY="$CODEX_WEB_HTTPS_PROXY"
+  export ALL_PROXY="$CODEX_WEB_ALL_PROXY"
+  export http_proxy="$CODEX_WEB_HTTP_PROXY"
+  export https_proxy="$CODEX_WEB_HTTPS_PROXY"
+  export all_proxy="$CODEX_WEB_ALL_PROXY"
+  export NO_PROXY="$CODEX_WEB_NO_PROXY"
+  export no_proxy="$CODEX_WEB_NO_PROXY"
+fi
+
+exec "$CODEX_WEB_NODE" "$CODEX_WEB_CODEX" --yolo app-server \
+  --listen "unix://$CODEX_UNIX_SOCKET" \
+  --analytics-default-enabled

@@ -1,29 +1,22 @@
---- a/webview/assets/local-conversation-thread-Dki9vHa8.js
-+++ b/webview/assets/local-conversation-thread-Dki9vHa8.js
-@@ -148,6 +148,7 @@
-   m as Bt,
-   ma as Vt,
-   mt as Ht,
-+  st as codexHostedWindowTitleAtom,
-   n as Ut,
-   on as Wt,
-   ot as Gt,
-@@ -34173,6 +34174,7 @@
-     h = xr(wt, e) ?? `needs_resume`,
-     g = xr(Gt, e),
-     _ = xr(Kt, e),
-+    codexHostedWindowTitle = xr(codexHostedWindowTitleAtom, e),
-     v = xr(Ht, e) === `projectless`,
-     y = xr(lt, e),
+--- a/webview/assets/local-conversation-thread-tEA3qvi1.js
++++ b/webview/assets/local-conversation-thread-tEA3qvi1.js
+@@ -13459,6 +13459,7 @@
+     k = a(O, e),
+     A = a(N, e) === `projectless`,
+     M = a(le, e),
+     P = a(he, e),
++    codexHostedWindowTitle = a(Rn, e),
      {
-@@ -34196,6 +34198,10 @@
+       hasInheritedParentTurns: F,
+       hasRenderableTurns: R,
+@@ -13482,6 +13483,10 @@
    (0, Q.useEffect)(() => {
-     I?.id == null || I.readAt != null || F(I.id);
-   }, [I?.id, I?.readAt, F]);
+     J?.id == null || J.readAt != null || q(J.id);
+   }, [J?.id, J?.readAt, q]);
 +  (0, Q.useEffect)(() => {
 +    let t = codexHostedWindowTitle?.trim();
 +    t && (document.title = `${t} | Codex`);
 +  }, [codexHostedWindowTitle]);
-   let z = li(),
-     { agentMode: B } = Ka({ conversationId: e, hostId: m }),
-     V = p ? P(p) : null,
+   let ue = $e(),
+     { agentMode: de } = Tn({ conversationId: e, hostId: w }),
+     fe = S ? ze(S) : null,

@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex app-server for codex-web
+After=network-online.target clash.service
+Wants=network-online.target
+Requires=clash.service
+
+[Service]
+Type=simple
+EnvironmentFile=/root/.config/codex-web/env
+ExecStart=/root/codex-web/scripts/codex_web_app_server_systemd_exec
+Restart=always
+RestartSec=5
+WorkingDirectory=/root/codex-web
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

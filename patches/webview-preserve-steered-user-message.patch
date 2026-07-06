@@ -1,5 +1,5 @@
---- a/webview/assets/app-server-manager-signals-BAE2L06u.js
-+++ b/webview/assets/app-server-manager-signals-BAE2L06u.js
+--- a/webview/assets/app-main-Dldh3K_n.js
++++ b/webview/assets/app-main-Dldh3K_n.js
 @@ -16756,7 +16756,22 @@
                  normalizeRestrictedImageDisplayPlaceholders: !1,
                }),

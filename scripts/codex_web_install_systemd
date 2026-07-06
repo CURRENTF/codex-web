@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install root systemd units for the split codex-web deployment. Secrets and
+# host-specific ports stay in /root/.config/codex-web/env.
+
+REPO_DIR="${CODEX_WEB_REPO_DIR:-/root/codex-web}"
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+
+if [[ "$(id -u)" != "0" ]]; then
+  echo "codex_web_install_systemd must run as root" >&2
+  exit 1
+fi
+if [[ ! -d "$REPO_DIR/deploy/systemd" ]]; then
+  echo "missing systemd templates under $REPO_DIR/deploy/systemd" >&2
+  exit 1
+fi
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+mkdir -p /root/.local/bin
+chmod 755 "$REPO_DIR/scripts/codex_web_app_server_systemd_exec"
+chmod 755 "$REPO_DIR/scripts/codex_web_systemd_exec"
+install -m 700 "$REPO_DIR/scripts/codex_web_app_server_start" \
+  /root/.local/bin/codex-web-app-server-start
+install -m 700 "$REPO_DIR/scripts/codex_web_app_server_proxy" \
+  /root/.local/bin/codex-web-app-server-proxy
+install -m 700 "$REPO_DIR/scripts/codex_web_ensure_node_pty" \
+  /root/.local/bin/codex-web-ensure-node-pty
+install -m 700 "$REPO_DIR/scripts/codex_web_split_start" \
+  /root/.local/bin/codex-web-start
+
+install -m 644 "$REPO_DIR/deploy/systemd/codex-web-app-server.service" \
+  /etc/systemd/system/codex-web-app-server.service
+install -m 644 "$REPO_DIR/deploy/systemd/codex-web.service" \
+  /etc/systemd/system/codex-web.service
+
+rm -rf /etc/systemd/system/codex-web.service.d
+rm -rf /etc/systemd/system/codex-web-app-server.service.d
+systemctl daemon-reload
+systemctl enable codex-web-app-server.service codex-web.service
+
+echo "installed codex-web systemd units"
+echo "restart with: systemctl restart codex-web-app-server.service codex-web.service"

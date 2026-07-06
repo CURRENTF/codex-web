@@ -100,6 +100,7 @@ someone with access to the web ui may be able to:
 - thin wrapper, so updates should land fast
 - working today:
   - subagents
+  - heartbeat automations
   - inline images
   - editor sidepanel
   - transcription

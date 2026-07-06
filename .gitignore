@@ -1,6 +1,8 @@
 node_modules/
 .cache/
+.codex-upload-tmp/
 .playwright-cli/
+._*
 scratch*/
 sentry
 logs/

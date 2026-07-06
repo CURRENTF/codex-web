@@ -2,20 +2,17 @@
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs as parseCliArgs } from "node:util";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import Fastify, { type FastifyReply } from "fastify";
 import fastifyCompress from "@fastify/compress";
 import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
-import {
-  ScheduledFakeUserPromptStore,
-  type ScheduledFakeUserPromptAck,
-} from "./scheduled_fake_user_prompts";
 
 type ServerOptions = {
   host: string;
@@ -28,19 +25,16 @@ type LoginBody = {
   password?: string;
 };
 
-type ScheduleFakeUserPromptBody = {
-  conversationId?: string;
-  prompt?: string;
-  dueAt?: string | number;
-  dueAtMs?: number;
-  delayMs?: number;
-  idempotencyKey?: string;
-  sourcePrompt?: string;
-  reason?: string;
+type PathsExistBody = {
+  hostId?: string;
+  paths?: string[];
 };
 
-type ScheduledFakeUserPromptParams = {
-  id: string;
+type GlobalStateBody = {
+  deletedKeys?: string[];
+  key?: string;
+  value?: unknown;
+  values?: Record<string, unknown>;
 };
 
 type MainAssetParams = {
@@ -118,6 +112,45 @@ type WorkspaceDirectoryEntries = {
   entries: WorkspaceDirectoryEntry[];
 };
 
+type AppServerRequest = {
+  id: string | number;
+  method: string;
+  params?: unknown;
+};
+
+type AppServerResponse = {
+  id: string | number;
+  result?: unknown;
+  error?: unknown;
+};
+
+type AppServerNotification = {
+  method: string;
+  params?: unknown;
+};
+
+type AppServerRequestMessageFromView = {
+  type: "mcp-request" | "thread-prewarm-start";
+  hostId?: unknown;
+  request?: unknown;
+};
+
+type AppServerResponseMessageFromView = {
+  type: "mcp-response";
+  hostId?: unknown;
+  response?: unknown;
+};
+
+type AppServerMessageFromView =
+  | AppServerRequestMessageFromView
+  | AppServerResponseMessageFromView;
+
+type AppServerBridgeOptions = {
+  broadcastToRenderer: (payload: unknown) => void;
+  maxPayload: number;
+  socketPath: string;
+};
+
 function workspaceDirectoryEntryTypeRank(
   entry: WorkspaceDirectoryEntry,
 ): number {
@@ -186,10 +219,12 @@ const RENDERER_REATTACH_GRACE_MS = 2_000;
 let cachedWebviewIndexHtml: string | null = null;
 const browserAssetCache = new Map<string, string>();
 const browserAssetVersion = Date.now().toString(36);
-const defaultScheduledFakeUserPromptDelayMs = 60 * 60 * 1_000;
-const scheduledFakeUserPromptRetryAfterMs = 30_000;
-const scheduledFakeUserPromptNoRendererRetryMs = 15_000;
-const maxScheduledFakeUserPromptTimerDelayMs = 2_147_483_647;
+
+const activeWorkspaceRootsKey = "active-workspace-roots";
+const globalStateStorageKey = "codex-web:global-state";
+const workspaceRootLabelsKey = "electron-workspace-root-labels";
+const workspaceRootOptionsStorageKey = "codex-web:workspace-root-options";
+const workspaceRootOptionsKey = "electron-saved-workspace-roots";
 
 function printUsage(): void {
   console.log(
@@ -242,6 +277,14 @@ function parsePort(raw: string): number {
   return parsed;
 }
 
+function parsePositiveInteger(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function parseServerArgs(args: string[]): ServerOptions {
   const parsed = parseCliArgs({
     args,
@@ -269,103 +312,6 @@ function parseServerArgs(args: string[]): ServerOptions {
   return {
     host: parsed.values.host ?? "127.0.0.1",
     port: parsed.values.port ? parsePort(parsed.values.port) : 8214,
-  };
-}
-
-function scheduledFakeUserPromptStorePath(): string {
-  const stateDir =
-    process.env.CODEX_WEB_STATE_DIR?.trim() ||
-    path.join(os.homedir(), ".codex-web");
-  return path.join(stateDir, "scheduled-fake-user-prompts.json");
-}
-
-function trimmedString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function optionalTrimmedString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function parseDueAtMs(body: ScheduleFakeUserPromptBody, nowMs: number): number {
-  if (body.dueAtMs !== undefined) {
-    if (!Number.isFinite(body.dueAtMs)) {
-      throw new Error("dueAtMs must be a finite number");
-    }
-    return Math.trunc(body.dueAtMs);
-  }
-
-  if (body.dueAt !== undefined) {
-    if (typeof body.dueAt === "number") {
-      if (!Number.isFinite(body.dueAt)) {
-        throw new Error("dueAt must be a finite number or date string");
-      }
-      return Math.trunc(body.dueAt);
-    }
-
-    const parsedDate = Date.parse(body.dueAt);
-    if (!Number.isFinite(parsedDate)) {
-      throw new Error("dueAt must be an ISO date string or epoch ms");
-    }
-    return parsedDate;
-  }
-
-  if (body.delayMs !== undefined) {
-    if (!Number.isFinite(body.delayMs) || body.delayMs < 0) {
-      throw new Error("delayMs must be a non-negative finite number");
-    }
-    return nowMs + Math.trunc(body.delayMs);
-  }
-
-  return nowMs + defaultScheduledFakeUserPromptDelayMs;
-}
-
-function buildDefaultScheduledFakeUserPrompt({
-  sourcePrompt,
-  reason,
-  dueAtMs,
-}: {
-  sourcePrompt?: string;
-  reason?: string;
-  dueAtMs: number;
-}): string {
-  return [
-    "[Scheduled follow-up generated by Codex Web]",
-    "",
-    "Resume this same Codex thread and continue from the prior context.",
-    reason ? `Reason: ${reason}` : null,
-    sourcePrompt ? `Original user request:\n${sourcePrompt}` : null,
-    `Scheduled fire time: ${new Date(dueAtMs).toISOString()}`,
-    "",
-    "Inspect the current state, especially any long-running command, experiment, training log, checkpoints, process state, and resource health that are relevant to the prior work. Report whether the run looks healthy, call out anomalies, and take the next reasonable action if it is not healthy.",
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
-}
-
-function validateScheduledFakeUserPromptAck(
-  value: unknown,
-): ScheduledFakeUserPromptAck | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  const ack = value as Record<string, unknown>;
-  if (
-    typeof ack.id !== "string" ||
-    (ack.status !== "accepted" &&
-      ack.status !== "sent" &&
-      ack.status !== "failed")
-  ) {
-    return null;
-  }
-
-  return {
-    id: ack.id,
-    status: ack.status,
-    ...(typeof ack.errorMessage === "string"
-      ? { errorMessage: ack.errorMessage }
-      : {}),
   };
 }
 
@@ -562,11 +508,515 @@ function getRegisteredRendererWebContents(): RendererWebContentsBridge | null {
   return null;
 }
 
+function syncRegisteredRendererWebContentsUrl(sourceUrl: string): void {
+  const registeredWebContents = getRegisteredRendererWebContents();
+  if (!registeredWebContents) {
+    return;
+  }
+
+  registeredWebContents.mainFrame.url = sourceUrl;
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.stack ?? error.message;
   }
   return String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isAppServerRequest(value: unknown): value is AppServerRequest {
+  return (
+    isRecord(value) &&
+    (typeof value.id === "string" || typeof value.id === "number") &&
+    typeof value.method === "string"
+  );
+}
+
+function isAppServerResponse(value: unknown): value is AppServerResponse {
+  return (
+    isRecord(value) &&
+    (typeof value.id === "string" || typeof value.id === "number") &&
+    ("result" in value || "error" in value)
+  );
+}
+
+function isAppServerNotification(
+  value: unknown,
+): value is AppServerNotification {
+  return (
+    isRecord(value) && typeof value.method === "string" && !("id" in value)
+  );
+}
+
+function isAppServerMessageFromView(
+  value: unknown,
+): value is AppServerMessageFromView {
+  return (
+    isRecord(value) &&
+    (value.type === "mcp-request" ||
+      value.type === "thread-prewarm-start" ||
+      value.type === "mcp-response")
+  );
+}
+
+function appServerRequestIdKey(id: string | number): string {
+  return String(id);
+}
+
+function normalizeHostId(hostId: unknown): string {
+  return typeof hostId === "string" && hostId ? hostId : "local";
+}
+
+function appServerVersionFromInitializeResult(result: unknown): string | null {
+  if (!isRecord(result) || typeof result.userAgent !== "string") {
+    return null;
+  }
+
+  return result.userAgent.match(/\d+\.\d+\.\d+/)?.[0] ?? null;
+}
+
+function appServerErrorPayload(error: unknown): { message: string } {
+  return { message: errorMessage(error) };
+}
+
+function expandHomePath(value: unknown): unknown {
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (typeof value === "string" && value.startsWith("~/")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
+}
+
+function codexHomeDirectory(): string {
+  return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
+}
+
+function globalStatePath(): string {
+  return path.join(codexHomeDirectory(), ".codex-global-state.json");
+}
+
+async function readGlobalStateFile(): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(globalStatePath(), "utf8")) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+async function writeGlobalStateFile(
+  globalState: Record<string, unknown>,
+): Promise<void> {
+  const filePath = globalStatePath();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(tmpPath, `${JSON.stringify(globalState, null, 2)}\n`);
+  await fs.rename(tmpPath, filePath);
+}
+
+async function patchGlobalStateFile(
+  body: GlobalStateBody | undefined,
+): Promise<Record<string, unknown>> {
+  const globalState = await readGlobalStateFile();
+  const values = isRecord(body?.values) ? body.values : {};
+
+  for (const [key, value] of Object.entries(values)) {
+    globalState[key] = value;
+  }
+
+  if (typeof body?.key === "string") {
+    if (body.value === undefined) {
+      delete globalState[body.key];
+    } else {
+      globalState[body.key] = body.value;
+    }
+  }
+
+  for (const key of isStringArray(body?.deletedKeys) ? body.deletedKeys : []) {
+    delete globalState[key];
+  }
+
+  await writeGlobalStateFile(globalState);
+  return globalState;
+}
+
+function normalizeDynamicToolSpec(tool: unknown): unknown {
+  if (!isRecord(tool)) {
+    return tool;
+  }
+
+  if (tool.type === "function") {
+    return {
+      ...tool,
+      inputSchema: tool.inputSchema ?? {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    };
+  }
+
+  if (tool.type === "namespace" && Array.isArray(tool.tools)) {
+    return {
+      ...tool,
+      tools: tool.tools.map((namespaceTool) =>
+        isRecord(namespaceTool)
+          ? {
+              ...namespaceTool,
+              type: "function",
+              inputSchema: namespaceTool.inputSchema ?? {
+                type: "object",
+                properties: {},
+                additionalProperties: false,
+              },
+            }
+          : namespaceTool,
+      ),
+    };
+  }
+
+  return tool;
+}
+
+function shouldReturnEmptyPastedTextAttachments(
+  request: AppServerRequest,
+): boolean {
+  return (
+    request.method === "fs/readFile" &&
+    isRecord(request.params) &&
+    request.params.path === "attachments/pasted-text-attachments.json"
+  );
+}
+
+function emptyPastedTextAttachmentsResponse(): AppServerResponse {
+  return {
+    id: "pasted-text-attachments",
+    result: {
+      dataBase64: Buffer.from("[]", "utf8").toString("base64"),
+    },
+  };
+}
+
+function normalizeAppServerRequest(
+  request: AppServerRequest,
+): AppServerRequest {
+  if (!isRecord(request.params)) {
+    return request;
+  }
+
+  const params = { ...request.params };
+  params.cwd = expandHomePath(params.cwd);
+  params.path = expandHomePath(params.path);
+  if (Array.isArray(params.runtimeWorkspaceRoots)) {
+    params.runtimeWorkspaceRoots = params.runtimeWorkspaceRoots.map((root) =>
+      expandHomePath(root),
+    );
+  }
+  if (request.method === "thread/start" && Array.isArray(params.dynamicTools)) {
+    params.dynamicTools = [];
+  }
+  if (request.method === "thread/start") {
+    params.modelProvider = "openai";
+    params.model_provider = "openai";
+  }
+
+  return {
+    ...request,
+    params,
+  };
+}
+
+class CodexAppServerBridge {
+  private initializePromise: Promise<void> | null = null;
+  private socket: WebSocket | null = null;
+  private readonly pendingRequestHostIds = new Map<string, string>();
+  private readonly pendingServerRequestHostIds = new Map<string, string>();
+
+  constructor(private readonly options: AppServerBridgeOptions) {}
+
+  canHandleMessageFromView(value: unknown): boolean {
+    return isAppServerMessageFromView(value);
+  }
+
+  async handleMessageFromView(message: unknown): Promise<void> {
+    if (!isAppServerMessageFromView(message)) {
+      return;
+    }
+
+    if (
+      message.type === "mcp-request" ||
+      message.type === "thread-prewarm-start"
+    ) {
+      await this.forwardClientRequest(message);
+      return;
+    }
+
+    if (message.type === "mcp-response") {
+      await this.forwardClientResponse(message);
+    }
+  }
+
+  private async forwardClientRequest(
+    message: AppServerRequestMessageFromView,
+  ): Promise<void> {
+    if (!isAppServerRequest(message.request)) {
+      throw new Error("[app-server-bridge] invalid app-server request payload");
+    }
+
+    const request = normalizeAppServerRequest(message.request);
+    const hostId = normalizeHostId(message.hostId);
+    if (shouldReturnEmptyPastedTextAttachments(request)) {
+      this.broadcastMcpResponse(hostId, {
+        ...emptyPastedTextAttachmentsResponse(),
+        id: request.id,
+      });
+      return;
+    }
+
+    this.pendingRequestHostIds.set(appServerRequestIdKey(request.id), hostId);
+
+    try {
+      await this.send(request);
+    } catch (error) {
+      this.pendingRequestHostIds.delete(appServerRequestIdKey(request.id));
+      this.broadcastMcpResponse(hostId, {
+        id: request.id,
+        error: appServerErrorPayload(error),
+      });
+      throw error;
+    }
+  }
+
+  private async forwardClientResponse(
+    message: AppServerResponseMessageFromView,
+  ): Promise<void> {
+    if (!isAppServerResponse(message.response)) {
+      throw new Error(
+        "[app-server-bridge] invalid app-server response payload",
+      );
+    }
+
+    this.pendingServerRequestHostIds.delete(
+      appServerRequestIdKey(message.response.id),
+    );
+    await this.send(message.response);
+  }
+
+  private async send(
+    message: AppServerRequest | AppServerResponse,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("[app-server-bridge] app-server socket is not open");
+    }
+    socket.send(JSON.stringify(message));
+  }
+
+  private ensureInitialized(): Promise<void> {
+    if (this.initializePromise) {
+      return this.initializePromise;
+    }
+
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+
+    const initializePromise = this.connectAndInitialize().catch((error) => {
+      if (this.initializePromise === initializePromise) {
+        this.initializePromise = null;
+      }
+      if (this.socket?.readyState !== WebSocket.OPEN) {
+        this.socket = null;
+      }
+      throw error;
+    });
+    this.initializePromise = initializePromise;
+    return initializePromise;
+  }
+
+  private async connectAndInitialize(): Promise<void> {
+    const initId = `codex-web-init-${randomUUID()}`;
+    const socket = new WebSocket("ws://codex-app-server/", {
+      createConnection: () => net.connect(this.options.socketPath),
+      maxPayload: this.options.maxPayload,
+      perMessageDeflate: false,
+    });
+    this.socket = socket;
+
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        socket.off("error", onError);
+        socket.off("message", onInitializeMessage);
+        socket.off("open", onOpen);
+      };
+      const fail = (error: unknown): void => {
+        cleanup();
+        reject(error);
+      };
+      const onError = (error: Error): void => {
+        fail(error);
+      };
+      const onOpen = (): void => {
+        socket.send(
+          JSON.stringify({
+            method: "initialize",
+            id: initId,
+            params: {
+              clientInfo: {
+                name: "codex-web",
+                title: "Codex Web",
+                version: "0.0.1",
+              },
+              capabilities: {
+                experimentalApi: true,
+                requestAttestation: false,
+              },
+            },
+          }),
+        );
+      };
+      const onInitializeMessage = (rawData: RawData): void => {
+        let message: unknown;
+        try {
+          message = JSON.parse(String(rawData));
+        } catch {
+          return;
+        }
+
+        if (!isAppServerResponse(message) || message.id !== initId) {
+          return;
+        }
+
+        cleanup();
+        if ("error" in message) {
+          reject(
+            new Error(
+              `[app-server-bridge] initialize failed: ${JSON.stringify(
+                message.error,
+              )}`,
+            ),
+          );
+          return;
+        }
+
+        const appServerVersion = appServerVersionFromInitializeResult(
+          message.result,
+        );
+
+        socket.on("message", (rawData) => {
+          this.handleAppServerMessage(rawData);
+        });
+        socket.on("error", (error) => {
+          this.failPendingRequests(error);
+        });
+        socket.on("close", () => {
+          if (this.socket === socket) {
+            this.socket = null;
+            this.initializePromise = null;
+          }
+          this.failPendingRequests(
+            new Error("[app-server-bridge] app-server connection closed"),
+          );
+        });
+        socket.send(JSON.stringify({ method: "initialized" }));
+        this.options.broadcastToRenderer({
+          type: "codex-app-server-initialized",
+          hostId: "local",
+          appServerVersion,
+          installedCodexVersion: null,
+        });
+        this.options.broadcastToRenderer({
+          type: "codex-app-server-connection-changed",
+          hostId: "local",
+          state: "connected",
+          error: null,
+          transport: "websocket",
+        });
+        resolve();
+      };
+
+      socket.on("error", onError);
+      socket.on("message", onInitializeMessage);
+      socket.on("open", onOpen);
+    });
+  }
+
+  private handleAppServerMessage(rawData: RawData): void {
+    let message: unknown;
+    try {
+      message = JSON.parse(String(rawData));
+    } catch (error) {
+      console.error("[app-server-bridge] invalid JSON payload", error);
+      return;
+    }
+
+    if (isAppServerResponse(message)) {
+      const key = appServerRequestIdKey(message.id);
+      const hostId = this.pendingRequestHostIds.get(key) ?? "local";
+      this.pendingRequestHostIds.delete(key);
+      this.broadcastMcpResponse(hostId, message);
+      return;
+    }
+
+    if (isAppServerRequest(message)) {
+      const hostId = "local";
+      this.pendingServerRequestHostIds.set(
+        appServerRequestIdKey(message.id),
+        hostId,
+      );
+      this.options.broadcastToRenderer({
+        type: "mcp-request",
+        hostId,
+        request: message,
+      });
+      return;
+    }
+
+    if (isAppServerNotification(message)) {
+      this.options.broadcastToRenderer({
+        type: "mcp-notification",
+        hostId: "local",
+        method: message.method,
+        params: message.params,
+      });
+      return;
+    }
+  }
+
+  private broadcastMcpResponse(
+    hostId: string,
+    message: AppServerResponse,
+  ): void {
+    this.options.broadcastToRenderer({
+      type: "mcp-response",
+      hostId,
+      message,
+    });
+  }
+
+  private failPendingRequests(error: unknown): void {
+    const payload = appServerErrorPayload(error);
+    for (const [requestId, hostId] of this.pendingRequestHostIds) {
+      this.broadcastMcpResponse(hostId, { id: requestId, error: payload });
+    }
+    this.pendingRequestHostIds.clear();
+    this.pendingServerRequestHostIds.clear();
+  }
 }
 
 function parseCookies(cookieHeader: string | undefined): Map<string, string> {
@@ -695,6 +1145,62 @@ function addBrowserAssetCacheBusters(html: string): string {
   );
 }
 
+function jsonForInlineScript(value: unknown): string {
+  return (JSON.stringify(value) ?? "null")
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function initialWorkspaceRootOptions(
+  globalState: Record<string, unknown>,
+): Record<string, unknown> {
+  const roots = globalState[workspaceRootOptionsKey];
+  const labels = globalState[workspaceRootLabelsKey];
+  return {
+    roots: isStringArray(roots) ? roots : [],
+    ...(isRecord(labels) ? { labels } : {}),
+  };
+}
+
+function injectInitialGlobalState(
+  html: string,
+  globalState: Record<string, unknown>,
+): string {
+  const workspaceRootOptions = initialWorkspaceRootOptions(globalState);
+  const serializedGlobalState = jsonForInlineScript(globalState);
+  const serializedGlobalStateStorage = jsonForInlineScript(
+    JSON.stringify(globalState),
+  );
+  const serializedWorkspaceRootOptionsStorage = jsonForInlineScript(
+    JSON.stringify(workspaceRootOptions),
+  );
+  const script = [
+    "<script>",
+    `window.__CODEX_WEB_INITIAL_GLOBAL_STATE__=${serializedGlobalState};`,
+    "try{",
+    `localStorage.setItem(${JSON.stringify(globalStateStorageKey)},${serializedGlobalStateStorage});`,
+    `localStorage.setItem(${JSON.stringify(workspaceRootOptionsStorageKey)},${serializedWorkspaceRootOptionsStorage});`,
+    "}catch(error){console.warn('[codex-web] failed to seed local state',error)}",
+    "</script>",
+  ].join("");
+
+  return html.replace(/(<head\b[^>]*>)/i, `$1\n    ${script}`);
+}
+
+function removeMalformedStyleResidue(html: string): string {
+  return html.replace(
+    /\n\s*}\s*\n\s*<\/style>(\s*<script type="module" crossorigin src="\.\/assets\/index-)/,
+    "\n$1",
+  );
+}
+
+function setImmutableAssetCacheHeaders(response: {
+  setHeader: (name: string, value: string) => void;
+}): void {
+  response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+}
+
 function redirectStatsigNetworkToLocalBootstrap(source: string): {
   source: string;
   redirected: boolean;
@@ -719,14 +1225,12 @@ function disableBlockingStatsigInit(source: string): string {
   }
 
   const networkRedirect = redirectStatsigNetworkToLocalBootstrap(source);
-  if (networkRedirect.redirected) {
-    return networkRedirect.source;
-  }
+  let patched = networkRedirect.source;
 
-  const statsigInitPattern =
+  const leadingStatsigInitPattern =
     /(\s*)let \{ client: ([\w$]+), isLoading: ([\w$]+) \} = \(0, ([\w$]+)\.useClientAsyncInit\)\(([^;]+?)\),\n\s*([\w$]+(?:\s*=\s*![\w$]+)?),\n\s*([\w$]+);/;
-  const patched = source.replace(
-    statsigInitPattern,
+  patched = patched.replace(
+    leadingStatsigInitPattern,
     (
       _match,
       indent: string,
@@ -743,6 +1247,33 @@ function disableBlockingStatsigInit(source: string): string {
       `${indent}  ${secondDeclaration};`,
   );
 
+  const chainedStatsigInitPattern =
+    /(\blet\s+[\w$]+\s*=\s*[\w$]+,\s*\{\s*client:\s*[\w$]+,\s*isLoading:\s*([\w$]+)\s*\}\s*=\s*\(0,\s*[\w$]+\.useClientAsyncInit\)\([^;]+?\),\s*[\w$]+;)/g;
+  patched = patched.replace(
+    chainedStatsigInitPattern,
+    (match, declaration: string, loadingName: string) =>
+      match.includes(`${loadingName} = false`)
+        ? match
+        : `${declaration}\n  ${loadingName} = false;`,
+  );
+
+  const compactStatsigInitPattern =
+    /(\blet\s*\{\s*client:\s*[\w$]+,\s*isLoading:\s*([\w$]+)\s*\}\s*=\s*\(0,\s*[\w$]+\.useClientAsyncInit\)\([^;]+?\);)/g;
+  patched = patched.replace(
+    compactStatsigInitPattern,
+    (match, declaration: string, loadingName: string) =>
+      match.includes(`${loadingName} = false`)
+        ? match
+        : `${declaration}\n  ${loadingName} = false;`,
+  );
+
+  const statsigUserUpdateGatePattern =
+    /(\n\s*)[\w$]+\s*\|\|\s*![\w$]+(\)\s*\)\s*\{\s*let\s+[\w$]+\s*=\s*`CodexStatsigProvider\.async`\s*\+\s*\([\w$]+\s*\?\s*``\s*:\s*`\.update`\))/g;
+  patched = patched.replace(
+    statsigUserUpdateGatePattern,
+    "$1false$2",
+  );
+
   if (patched === source) {
     console.warn(
       "[browser-patch] Statsig async init gate was not found in the main asset",
@@ -752,12 +1283,16 @@ function disableBlockingStatsigInit(source: string): string {
 }
 
 function disableBlockingAccountInfoInit(source: string): string {
-  const accountInfoGate =
+  const legacyAccountInfoGate =
     /if \(r\.isLoading \|\| a \|\| s \|\| \(([\w$]+) && ([\w$]+)\) \|\| \(\1 && ([\w$]+) && !([\w$]+)\)\) \{/;
-  const patched = source.replace(
-    accountInfoGate,
+  let patched = source.replace(
+    legacyAccountInfoGate,
     "if (r.isLoading || a || s) {",
   );
+
+  const asyncIdentityAccountInfoGate =
+    /if\s*\(\s*[\w$]+\s*\|\|\s*\([\w$]+\s*&&\s*![\w$]+\)\s*\)\s*\{/;
+  patched = patched.replace(asyncIdentityAccountInfoGate, "if (false) {");
 
   if (patched === source) {
     console.warn(
@@ -767,23 +1302,153 @@ function disableBlockingAccountInfoInit(source: string): string {
   return patched;
 }
 
-async function getPatchedMainAsset(assetPath: string): Promise<string> {
+function disableBlockingAuthBootstrap(source: string): string {
+  const patched = source.replace(
+    "if (r.isLoading || a || s) {",
+    "if (a || s) {",
+  );
+
+  if (patched === source) {
+    console.warn(
+      "[browser-patch] auth bootstrap loading gate was not found in the main asset",
+    );
+  }
+  return patched;
+}
+
+function disableBlockingDesktopAuthContext(source: string): string {
+  const patched = source.replace(
+    [
+      "isLoading: m,",
+      "        openAIAuth: x,",
+      "        isCopilotApiAvailable: a,",
+      "        authMethod: S,",
+      "        requiresAuth: C,",
+    ].join("\n"),
+    [
+      "isLoading: false,",
+      "        openAIAuth: x,",
+      "        isCopilotApiAvailable: a,",
+      "        authMethod: S,",
+      "        requiresAuth: false,",
+    ].join("\n"),
+  );
+
+  if (patched === source) {
+    console.warn(
+      "[browser-patch] desktop auth context loading fields were not found in the main asset",
+    );
+  }
+  return patched;
+}
+
+function useLocalAppHostServices(source: string): string {
+  const patched = source.replace(
+    "async function At(){$=kt(),jt=await $.services}",
+    "async function At(){$={services:Ot.services},jt=Ot.services}",
+  );
+
+  if (patched === source && source.includes("connect-app-host")) {
+    console.warn(
+      "[browser-patch] app-host service bootstrap was not found in the RPC asset",
+    );
+  }
+  return patched;
+}
+
+type PatchedBrowserAssetPrefix =
+  | "app-main"
+  | "get-attached-heartbeat-automation-for-thread"
+  | "index"
+  | "interrupted-turn-state"
+  | "rpc";
+
+function tolerateMissingRequestUserInputAutoResolution(source: string): string {
+  const patched = source
+    .replace(
+      /(\b[$A-Z_a-z][$\w]*\.requestUserInputAutoResolution)\.setConversationPresented\?\./g,
+      "$1?.setConversationPresented?.",
+    )
+    .replace(
+      /(\b[$A-Z_a-z][$\w]*\.requestUserInputAutoResolution)\.recordConversationActivity\?\./g,
+      "$1?.recordConversationActivity?.",
+    );
+
+  if (
+    patched === source &&
+    source.includes("requestUserInputAutoResolution")
+  ) {
+    console.warn(
+      "[browser-patch] requestUserInputAutoResolution optional object guard was not found in the interrupted-turn-state asset",
+    );
+  }
+
+  return patched;
+}
+
+function tolerateMissingHeartbeatAutomations(source: string): string {
+  const patched = source.replace(
+    /(\breturn\s+[$A-Z_a-z][$\w]*==null\?null:)([$A-Z_a-z][$\w]*)\.find\(/g,
+    "$1($2??[]).find(",
+  );
+
+  if (patched === source && source.includes(".find(")) {
+    console.warn(
+      "[browser-patch] heartbeat automation list guard was not found in the get-attached-heartbeat-automation-for-thread asset",
+    );
+  }
+
+  return patched;
+}
+
+function patchBrowserAsset(
+  source: string,
+  prefix: PatchedBrowserAssetPrefix,
+): string {
+  if (prefix === "app-main") {
+    return disableBlockingAuthBootstrap(
+      disableBlockingDesktopAuthContext(
+        disableBlockingAccountInfoInit(disableBlockingStatsigInit(source)),
+      ),
+    );
+  }
+
+  if (prefix === "rpc") {
+    return useLocalAppHostServices(source);
+  }
+
+  if (prefix === "interrupted-turn-state") {
+    return tolerateMissingRequestUserInputAutoResolution(source);
+  }
+
+  if (prefix === "get-attached-heartbeat-automation-for-thread") {
+    return tolerateMissingHeartbeatAutomations(source);
+  }
+
+  return source;
+}
+
+async function getPatchedBrowserAsset(
+  assetPath: string,
+  prefix: PatchedBrowserAssetPrefix,
+): Promise<string> {
   const cached = browserAssetCache.get(assetPath);
   if (cached !== undefined) {
     return cached;
   }
 
   const source = await fs.readFile(assetPath, "utf8");
-  const patched = disableBlockingAccountInfoInit(
-    disableBlockingStatsigInit(source),
-  );
+  const patched = patchBrowserAsset(source, prefix);
   browserAssetCache.set(assetPath, patched);
   return patched;
 }
 
 async function getWebviewIndexHtml(webviewRoot: string): Promise<string> {
   if (cachedWebviewIndexHtml !== null) {
-    return cachedWebviewIndexHtml;
+    return injectInitialGlobalState(
+      cachedWebviewIndexHtml,
+      await readGlobalStateFile(),
+    );
   }
 
   const html = await fs.readFile(path.join(webviewRoot, "index.html"), "utf8");
@@ -791,14 +1456,19 @@ async function getWebviewIndexHtml(webviewRoot: string): Promise<string> {
     process.env.CODEX_WEB_MODULEPRELOAD === "1"
       ? html
       : stripModulePreloadLinks(html);
-  cachedWebviewIndexHtml = addBrowserAssetCacheBusters(preprocessedHtml);
-  return cachedWebviewIndexHtml;
+  cachedWebviewIndexHtml = addBrowserAssetCacheBusters(
+    removeMalformedStyleResidue(preprocessedHtml),
+  );
+  return injectInitialGlobalState(
+    cachedWebviewIndexHtml,
+    await readGlobalStateFile(),
+  );
 }
 
 async function sendPatchedMainAsset(
   reply: FastifyReply,
   webviewRoot: string,
-  prefix: "app-main" | "index",
+  prefix: PatchedBrowserAssetPrefix,
   hash: string,
 ): Promise<FastifyReply> {
   if (!/^[A-Za-z0-9_-]+$/.test(hash)) {
@@ -808,8 +1478,8 @@ async function sendPatchedMainAsset(
   const assetPath = path.join(webviewRoot, "assets", `${prefix}-${hash}.js`);
   return reply
     .header("Content-Type", "text/javascript; charset=utf-8")
-    .header("Cache-Control", "no-cache")
-    .send(await getPatchedMainAsset(assetPath));
+    .header("Cache-Control", "private, max-age=31536000, immutable")
+    .send(await getPatchedBrowserAsset(assetPath, prefix));
 }
 
 async function sendWebviewIndexHtml(
@@ -864,6 +1534,24 @@ async function getWorkspaceDirectoryEntries({
   };
 }
 
+async function existingPaths(paths: string[] | undefined): Promise<string[]> {
+  const uniquePaths = [...new Set(paths ?? [])]
+    .map((value) => expandHomePath(value))
+    .filter((value): value is string => typeof value === "string" && !!value);
+  const results = await Promise.all(
+    uniquePaths.map(async (candidatePath) => {
+      try {
+        await fs.stat(candidatePath);
+        return candidatePath;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return results.filter((value): value is string => value !== null);
+}
+
 function ensureElectronLikeProcessContext(): void {
   const versions = process.versions as NodeJS.ProcessVersions & {
     electron?: string;
@@ -886,6 +1574,24 @@ function ensureElectronLikeProcessContext(): void {
     "../../scratch/asar",
   );
   processWithElectronFields.type ??= "browser";
+
+  const processWithLinkedBinding = process as NodeJS.Process & {
+    _linkedBinding?: (name: string) => unknown;
+  };
+  const originalLinkedBinding = processWithLinkedBinding._linkedBinding?.bind(
+    process,
+  );
+  processWithLinkedBinding._linkedBinding = (name: string): unknown => {
+    if (name === "electron_common_owl_features") {
+      return {
+        isOwlFeatureEnabled: () => false,
+      };
+    }
+    if (originalLinkedBinding) {
+      return originalLinkedBinding(name);
+    }
+    throw new Error(`No such binding was linked: ${name}`);
+  };
 }
 
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
@@ -908,12 +1614,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     ? authTokenForPassword(configuredPassword)
     : null;
   const webviewRoot = path.resolve(__dirname, "../../scratch/asar/webview");
-  const scheduledFakeUserPromptStore = new ScheduledFakeUserPromptStore(
-    scheduledFakeUserPromptStorePath(),
-  );
-  let lastActiveLocalConversationId: string | null = null;
-  let scheduledFakeUserPromptTimer: ReturnType<typeof setTimeout> | null = null;
-  let scheduledFakeUserPromptTimerToken = 0;
 
   app.addContentTypeParser(
     "application/x-www-form-urlencoded",
@@ -944,84 +1644,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const uploadRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "codex-web-uploads-"),
   );
-
-  function armScheduledFakeUserPromptTimer(delayOverrideMs?: number): void {
-    scheduledFakeUserPromptTimerToken += 1;
-    const token = scheduledFakeUserPromptTimerToken;
-    if (scheduledFakeUserPromptTimer) {
-      clearTimeout(scheduledFakeUserPromptTimer);
-      scheduledFakeUserPromptTimer = null;
-    }
-
-    void (async () => {
-      const nowMs = Date.now();
-      const nextDispatchAtMs =
-        delayOverrideMs == null
-          ? await scheduledFakeUserPromptStore.getNextDispatchAtMs(
-              nowMs,
-              scheduledFakeUserPromptRetryAfterMs,
-            )
-          : nowMs + delayOverrideMs;
-
-      if (token !== scheduledFakeUserPromptTimerToken) {
-        return;
-      }
-
-      if (nextDispatchAtMs == null) {
-        return;
-      }
-
-      const delayMs = Math.min(
-        Math.max(0, nextDispatchAtMs - Date.now()),
-        maxScheduledFakeUserPromptTimerDelayMs,
-      );
-
-      scheduledFakeUserPromptTimer = setTimeout(() => {
-        scheduledFakeUserPromptTimer = null;
-        void dispatchDueScheduledFakeUserPrompts();
-      }, delayMs);
-    })().catch((error) => {
-      console.error("[scheduled-fake-user-prompt] failed to arm timer", error);
-    });
-  }
-
-  async function dispatchDueScheduledFakeUserPrompts(): Promise<void> {
-    const nowMs = Date.now();
-    const prompts = await scheduledFakeUserPromptStore.getDispatchablePrompts(
-      nowMs,
-      scheduledFakeUserPromptRetryAfterMs,
-    );
-
-    if (prompts.length === 0) {
-      armScheduledFakeUserPromptTimer();
-      return;
-    }
-
-    if (sockets.size === 0 || !bridgeState.broadcastToRenderer) {
-      armScheduledFakeUserPromptTimer(scheduledFakeUserPromptNoRendererRetryMs);
-      return;
-    }
-
-    for (const prompt of prompts) {
-      await scheduledFakeUserPromptStore.markDispatched(prompt.id, nowMs);
-      bridgeState.broadcastToRenderer({
-        type: "ipc-main-event",
-        channel: "codex_web:scheduled-fake-user-prompt",
-        args: [
-          {
-            id: prompt.id,
-            conversationId: prompt.conversationId,
-            prompt: prompt.prompt,
-            dueAtMs: prompt.dueAtMs,
-            createdAtMs: prompt.createdAtMs,
-            attempts: prompt.attempts + 1,
-          },
-        ],
-      });
-    }
-
-    armScheduledFakeUserPromptTimer();
-  }
 
   app.get("/__auth/login", async (_request, reply) => {
     return reply.type("text/html").send(loginPage());
@@ -1062,80 +1684,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     return reply.code(401).send({ error: "Unauthorized" });
   });
 
-  app.get("/__backend/scheduled-fake-user-prompts", async (_request, reply) => {
-    return reply.send({
-      activeConversationId: lastActiveLocalConversationId,
-      prompts: await scheduledFakeUserPromptStore.list(),
-    });
-  });
-
-  app.post<{ Body: ScheduleFakeUserPromptBody }>(
-    "/__backend/scheduled-fake-user-prompts",
-    async (request, reply) => {
-      const body = request.body ?? {};
-      const nowMs = Date.now();
-      let dueAtMs: number;
-      try {
-        dueAtMs = parseDueAtMs(body, nowMs);
-      } catch (error) {
-        return reply.code(400).send({ error: errorMessage(error) });
-      }
-
-      const conversationId =
-        trimmedString(body.conversationId) ?? lastActiveLocalConversationId;
-      if (!conversationId) {
-        return reply.code(400).send({
-          error:
-            "conversationId is required until a local thread is active in the browser",
-        });
-      }
-
-      const sourcePrompt = optionalTrimmedString(body.sourcePrompt);
-      const reason = optionalTrimmedString(body.reason);
-      const prompt =
-        trimmedString(body.prompt) ??
-        buildDefaultScheduledFakeUserPrompt({
-          sourcePrompt,
-          reason,
-          dueAtMs,
-        });
-
-      const result = await scheduledFakeUserPromptStore.create(
-        {
-          conversationId,
-          prompt,
-          dueAtMs,
-          idempotencyKey: optionalTrimmedString(body.idempotencyKey),
-          sourcePrompt,
-          reason,
-        },
-        nowMs,
-      );
-      if (result.prompt.dueAtMs <= nowMs) {
-        void dispatchDueScheduledFakeUserPrompts();
-      } else {
-        armScheduledFakeUserPromptTimer();
-      }
-
-      return reply.code(result.created ? 201 : 200).send(result);
-    },
-  );
-
-  app.delete<{ Params: ScheduledFakeUserPromptParams }>(
-    "/__backend/scheduled-fake-user-prompts/:id",
-    async (request, reply) => {
-      const prompt = await scheduledFakeUserPromptStore.cancel(
-        request.params.id,
-      );
-      if (!prompt) {
-        return reply.code(404).send({ error: "Not Found" });
-      }
-
-      armScheduledFakeUserPromptTimer();
-      return reply.send({ prompt });
-    },
-  );
-
   app.post("/__backend/upload", async (request, reply) => {
     if (!request.isMultipart()) {
       return reply.code(400).send({ error: "expected multipart upload body" });
@@ -1161,6 +1709,27 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     return reply.send({ files });
   });
+
+  app.post<{ Body: PathsExistBody }>(
+    "/__backend/paths-exist",
+    async (request, reply) => {
+      return reply.send({
+        hostId: request.body?.hostId ?? "local",
+        existingPaths: await existingPaths(request.body?.paths),
+      });
+    },
+  );
+
+  app.get("/__backend/global-state", async (_request, reply) => {
+    return reply.send({ values: await readGlobalStateFile() });
+  });
+
+  app.post<{ Body: GlobalStateBody }>(
+    "/__backend/global-state",
+    async (request, reply) => {
+      return reply.send({ values: await patchGlobalStateFile(request.body) });
+    },
+  );
 
   await app.register(fastifyStatic, {
     root: "/",
@@ -1200,9 +1769,46 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     },
   );
 
+  app.get<{ Params: MainAssetParams }>(
+    "/assets/rpc-:hash.js",
+    async (request, reply) => {
+      return sendPatchedMainAsset(
+        reply,
+        webviewRoot,
+        "rpc",
+        request.params.hash,
+      );
+    },
+  );
+
+  app.get<{ Params: MainAssetParams }>(
+    "/assets/interrupted-turn-state-:hash.js",
+    async (request, reply) => {
+      return sendPatchedMainAsset(
+        reply,
+        webviewRoot,
+        "interrupted-turn-state",
+        request.params.hash,
+      );
+    },
+  );
+
+  app.get<{ Params: MainAssetParams }>(
+    "/assets/get-attached-heartbeat-automation-for-thread-:hash.js",
+    async (request, reply) => {
+      return sendPatchedMainAsset(
+        reply,
+        webviewRoot,
+        "get-attached-heartbeat-automation-for-thread",
+        request.params.hash,
+      );
+    },
+  );
+
   await app.register(fastifyStatic, {
     root: webviewRoot,
     prefix: "/",
+    setHeaders: setImmutableAssetCacheHeaders,
   });
 
   app.setNotFoundHandler((request, reply) => {
@@ -1248,6 +1854,19 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
   };
 
+  const appServerBridge = new CodexAppServerBridge({
+    broadcastToRenderer: (payload: unknown) => {
+      bridgeState.broadcastToRenderer?.({
+        type: "ipc-main-event",
+        channel: "codex_desktop:message-for-view",
+        args: [payload],
+      });
+    },
+    maxPayload: parsePositiveInteger(process.env.CODEX_BUFFER_SIZE, 104857600),
+    socketPath:
+      process.env.CODEX_UNIX_SOCKET?.trim() || "/tmp/codex-web-app-server.sock",
+  });
+
   websocketServer.on("connection", (socket) => {
     const socketRendererWebContents =
       rendererWebContentsBridgeRouter.createBridgeForSocket(socket);
@@ -1272,44 +1891,18 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
         message.sourceUrl
       ) {
         socketRendererWebContents.mainFrame.url = message.sourceUrl;
+        syncRegisteredRendererWebContentsUrl(message.sourceUrl);
       }
 
       if (message.type === "codex-web-route-state") {
-        if (message.conversationId) {
-          lastActiveLocalConversationId = message.conversationId;
-        }
         return;
       }
 
       if (message.type === "ipc-renderer-send") {
-        if (message.channel === "codex_web:scheduled-fake-user-prompt-result") {
-          const ack = validateScheduledFakeUserPromptAck(message.args[0]);
-          if (!ack) {
-            console.warn(
-              "[scheduled-fake-user-prompt] invalid renderer ack",
-              message.args[0],
-            );
-            return;
-          }
-
-          scheduledFakeUserPromptStore
-            .applyAck(ack)
-            .then(() => {
-              armScheduledFakeUserPromptTimer();
-            })
-            .catch((error) => {
-              console.error(
-                "[scheduled-fake-user-prompt] failed to apply renderer ack",
-                error,
-              );
-            });
-          return;
-        }
-
         bridgeState.handleRendererSend?.(
           message.channel,
           message.args,
-          getRegisteredRendererWebContents() ?? socketRendererWebContents,
+          socketRendererWebContents,
         );
         return;
       }
@@ -1344,11 +1937,43 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
       if (message.type === "ipc-renderer-invoke") {
         const { channel, requestId, args } = message;
+        if (
+          channel === "codex_desktop:message-from-view" &&
+          args.length === 1 &&
+          appServerBridge.canHandleMessageFromView(args[0])
+        ) {
+          appServerBridge
+            .handleMessageFromView(args[0])
+            .then(() => {
+              const payload: MainToRendererMessage = {
+                type: "ipc-renderer-invoke-result",
+                requestId,
+                ok: true,
+                result: undefined,
+              };
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(payload));
+              }
+            })
+            .catch((error) => {
+              const payload: MainToRendererMessage = {
+                type: "ipc-renderer-invoke-result",
+                requestId,
+                ok: false,
+                errorMessage: errorMessage(error),
+              };
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(payload));
+              }
+            });
+          return;
+        }
+
         Promise.resolve(
           bridgeState.handleRendererInvoke?.(
             channel,
             args,
-            getRegisteredRendererWebContents() ?? socketRendererWebContents,
+            socketRendererWebContents,
           ) ??
             Promise.reject(
               new Error(
@@ -1384,7 +2009,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
   await app.listen({ host: options.host, port: options.port });
   console.log(`IPC bridge listening at ws://${options.host}:${options.port}`);
-  armScheduledFakeUserPromptTimer();
 
   ensureElectronLikeProcessContext();
   installModuleAliasHook();

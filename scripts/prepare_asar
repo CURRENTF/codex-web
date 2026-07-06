@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-unzip -o "$HOSTED_CODEX_APP_ZIP" -d scratch/
+unzip -qo "$HOSTED_CODEX_APP_ZIP" -d scratch/
+rm -rf "scratch/asar"
 asar extract "scratch/Codex.app/Contents/Resources/app.asar" "scratch/asar"
 cp assets/* scratch/asar/webview/
 PWA_SOURCE_ICON="scratch/asar/webview/assets/app-D0g8sCle.png"
@@ -16,29 +17,51 @@ sharp -i "$PWA_SOURCE_ICON" -o "$PWA_TARGET_ICON" -f png resize "$PWA_CONTENT_SI
 if [[ -n "${DEV:-}" ]]; then
   prettier --ignore-path /dev/null --ignore-unknown --write "scratch/asar"
 else
+  applied_patches=(
+    patches/webview-style.patch
+    patches/webview-preload.patch
+    patches/webview-favicon.patch
+    patches/webview-pwa.patch
+    patches/webview-thread-title.patch
+    patches/webview-initial-route.patch
+    patches/webview-electron-shim-close-sidebar.patch
+    patches/webview-use-atfs-for-local-files.patch
+    patches/webview-statsig-override-adapter.patch
+    patches/sentry-disable-webview.patch
+  )
   patched_files=()
   while IFS= read -r patched_file; do
-    patched_files+=("$patched_file")
+    if [[ -e "$patched_file" ]]; then
+      patched_files+=("$patched_file")
+    fi
   done < <(
-    awk '/^\+\+\+ b\//{sub(/^\+\+\+ b\//, "scratch/asar/"); print}' patches/*.patch | sort -u
+    awk '/^\+\+\+ b\//{sub(/^\+\+\+ b\//, "scratch/asar/"); print}' "${applied_patches[@]}" | sort -u
   )
-  prettier --ignore-path /dev/null --ignore-unknown --write "${patched_files[@]}"
+  if (( ${#patched_files[@]} )); then
+    prettier --ignore-path /dev/null --ignore-unknown --write "${patched_files[@]}"
+  fi
 fi
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-remove-csp.patch
+perl -0pi -e 's/\n    <meta\n      http-equiv="Content-Security-Policy"\n      content="[^"]*"\n    \/>//' scratch/asar/webview/index.html
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-style.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-preload.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-favicon.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-pwa.patch
+perl -0pi -e 's#\n\s*}\s*\n\s*</style>(\s*<script type="module" crossorigin src="\./assets/index-)#\n$1#' scratch/asar/webview/index.html
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-thread-title.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-preserve-steered-user-message.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-initial-route.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-electron-shim-close-sidebar.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-prosemirror-inputmode.patch
+# Codex App 26.616.81150 moved the old steering merge path and no longer ships
+# the standalone ProseMirror bundle targeted by these historical patches.
+# Re-enable these only after porting them to the current upstream chunks.
+# patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-preserve-steered-user-message.patch
+# patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-prosemirror-inputmode.patch
+# patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-prompt-search-param.patch
+# patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-clipboard-fallback.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-use-atfs-for-local-files.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-prompt-search-param.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-scheduled-fake-user-prompt.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-statsig-override-adapter.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-clipboard-fallback.patch
-patch --batch --forward --strip 1 --directory scratch/asar < patches/sentry-disable-shell.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/sentry-disable-webview.patch
+# The shell Sentry bundle changes frequently and is not required for browser
+# hosting. Keep the patch file for reference, but do not block app upgrades on it.
+# patch --batch --forward --strip 1 --directory scratch/asar < patches/sentry-disable-shell.patch
+find scratch/asar \( -name "*.rej" -o -name "*.orig" \) -delete
 rm -rf scratch/asar/node_modules/better-sqlite3

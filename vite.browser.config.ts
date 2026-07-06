@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -11,6 +12,8 @@ const preloadEntryPath = path.resolve(
   "scratch/asar/.vite/build/preload.js",
 );
 const browserNodeEnv = process.env.NODE_ENV ?? "production";
+const projectlessCwd =
+  process.env.CODEX_WEB_PROJECTLESS_CWD?.trim() || os.homedir();
 const asarPackageJson = JSON.parse(readFileSync(asarPackagePath, "utf8")) as {
   version?: unknown;
 };
@@ -23,7 +26,10 @@ export default defineConfig({
   root: webviewRoot,
   define: {
     __CODEX_APP_VERSION__: JSON.stringify(asarPackageJson.version),
+    __CODEX_WEB_PROJECTLESS_CWD__: JSON.stringify(projectlessCwd),
     "process.env.NODE_ENV": JSON.stringify(browserNodeEnv),
+    "process.arch": JSON.stringify("x64"),
+    "process.platform": JSON.stringify("linux"),
   },
   server: {
     host: "127.0.0.1",

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Foreground codex-web entrypoint for systemd. The app-server is expected to be
+# managed by codex-web-app-server.service and reached through CODEX_CLI_PATH.
+
+ENV_FILE="${CODEX_WEB_ENV_FILE:-/root/.config/codex-web/env}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+: "${CODEX_WEB_REPO_DIR:=/root/codex-web}"
+: "${CODEX_WEB_NODE:=/root/node/bin/node}"
+: "${CODEX_WEB_PROXY:=/root/.local/bin/codex-web-app-server-proxy}"
+: "${CODEX_WEB_APP_SERVER_PROXY_NODE:=$CODEX_WEB_REPO_DIR/scripts/codex_web_app_server_proxy_node.mjs}"
+: "${CODEX_WEB_HOST:=127.0.0.1}"
+: "${CODEX_WEB_PORT:=16006}"
+: "${CODEX_HOME:=/root/.codex}"
+: "${CODEX_WEB_PASSWORD:=}"
+: "${CODEX_UNIX_SOCKET:=/tmp/codex-web-app-server.sock}"
+: "${CODEX_BUFFER_SIZE:=104857600}"
+: "${CODEX_WEB_ENSURE_NODE_PTY:=1}"
+: "${CODEX_WEB_ENSURE_NODE_PTY_SCRIPT:=$CODEX_WEB_REPO_DIR/scripts/codex_web_ensure_node_pty}"
+
+if [[ ! -d "$CODEX_WEB_REPO_DIR" ]]; then
+  echo "$(date -Is) missing repo: $CODEX_WEB_REPO_DIR" >&2
+  exit 1
+fi
+if [[ ! -x "$CODEX_WEB_NODE" ]]; then
+  echo "$(date -Is) missing node: $CODEX_WEB_NODE" >&2
+  exit 127
+fi
+if [[ ! -x "$CODEX_WEB_PROXY" ]]; then
+  echo "$(date -Is) missing proxy: $CODEX_WEB_PROXY" >&2
+  exit 1
+fi
+if [[ -z "$CODEX_WEB_PASSWORD" ]]; then
+  echo "$(date -Is) CODEX_WEB_PASSWORD is empty" >&2
+  exit 1
+fi
+
+for _ in $(seq 1 80); do
+  [[ -S "$CODEX_UNIX_SOCKET" ]] && break
+  sleep 0.25
+done
+if [[ ! -S "$CODEX_UNIX_SOCKET" ]]; then
+  echo "$(date -Is) app-server socket missing: $CODEX_UNIX_SOCKET" >&2
+  exit 1
+fi
+
+if [[ "$CODEX_WEB_ENSURE_NODE_PTY" = "1" ]]; then
+  if [[ ! -x "$CODEX_WEB_ENSURE_NODE_PTY_SCRIPT" ]]; then
+    echo "$(date -Is) missing node-pty ensure script: $CODEX_WEB_ENSURE_NODE_PTY_SCRIPT" >&2
+    exit 1
+  fi
+  "$CODEX_WEB_ENSURE_NODE_PTY_SCRIPT"
+fi
+
+cd "$CODEX_WEB_REPO_DIR"
+export CODEX_HOME CODEX_WEB_PASSWORD CODEX_UNIX_SOCKET CODEX_BUFFER_SIZE
+export CODEX_WEB_REPO_DIR CODEX_WEB_NODE CODEX_WEB_APP_SERVER_PROXY_NODE
+export CODEX_CLI_PATH="$CODEX_WEB_PROXY"
+export PATH="$(dirname "$CODEX_WEB_NODE"):/root/npm-global/bin:$PATH"
+
+exec "$CODEX_WEB_NODE" src/server/main.js --host "$CODEX_WEB_HOST" --port "$CODEX_WEB_PORT"

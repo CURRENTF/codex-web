@@ -175,6 +175,19 @@ upper- and lower-case proxy variables before launching `codex --yolo
 app-server`. Set it to `0` only when the host has direct supported network
 access.
 
+On root-managed hosts where systemd is available, prefer installing the repo
+unit files so systemd owns the only long-lived app-server and web process:
+
+```bash
+cd /root/codex-web
+scripts/codex_web_install_systemd
+systemctl restart codex-web-app-server.service codex-web.service
+```
+
+Do not mix a manual `codex-web-app-server-start` `nohup` process with enabled
+`codex-web-app-server.service`; `Restart=always` will bring the systemd copy
+back and create duplicate app-server processes for the same Unix socket.
+
 Start or restart only the web side:
 
 ```bash
@@ -217,6 +230,78 @@ test -S /tmp/codex-web-app-server.sock
 netstat -ltnp 2>/dev/null | grep ':6006'
 tr '\0' '\n' </proc/$(cat /root/codex-web/logs/codex-app-server.pid)/environ | grep -Ei '^(HTTP|HTTPS|ALL)_PROXY='
 /root/.local/bin/codex-web-ensure-node-pty
+```
+
+## Codex App Upgrade
+
+Observed on 2026-06-25: `root@8.134.70.136:/root/codex-web` was upgraded to
+Codex App/Desktop `26.616.81150`. This is separate from the Codex CLI version.
+
+Prepare the app bundle from the repo root:
+
+```bash
+cd /root/codex-web
+export PATH=/root/codex-web/node_modules/.bin:/root/node/bin:/root/npm-global/bin:$PATH
+APP_VERSION=26.616.81150 npm run prepare
+```
+
+Without `APP_VERSION`, `scripts/prepare` resolves the latest version from the
+official appcast. Downloaded zips are cached under `.cache/codex-app-zips` so a
+failed prepare can be retried without another full download. `scripts/prepare_asar`
+clears `scratch/asar` before extraction, applies the ported patch set, removes
+the upstream CSP, and skips historical patches that no longer match the
+`26.616` bundle until they are ported.
+
+After prepare, verify the unpacked App version and stale patch residue:
+
+```bash
+node -p "require('./scratch/asar/package.json').version"
+find scratch/asar -name '*.rej' -o -name '*.orig'
+```
+
+Build and restart in split mode. Reuse the existing app-server unless the
+app-server itself changed or is unhealthy:
+
+```bash
+npm run build:browser
+npm run build:server
+old_pid="$(cat logs/codex-web.pid 2>/dev/null || true)"
+[ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+scripts/codex_web_split_start
+```
+
+On the `8.134.70.136` host, `curl -I http://127.0.0.1:6006/` returning
+`401 Unauthorized` is a healthy unauthenticated response. Also check:
+
+```bash
+test -S /tmp/codex-web-app-server.sock
+cat logs/codex-web.pid
+```
+
+The `26.616` app bundle needs runtime browser compatibility patches in
+`src/server/main.ts` and browser shims in `src/browser/`:
+
+- the main browser asset does not block first render on Statsig, account-info,
+  or desktop auth loading.
+- the RPC asset uses local app-host services instead of waiting for the native
+  desktop MessagePort handshake.
+- local `vscode://codex/*` handlers return structured empty data for settings,
+  inbox, workspace roots, and command keymaps instead of relying on a generic
+  `{}` fallback.
+- the preload shim supplies missing Electron APIs, no-ops unsupported worker
+  channels, and initializes onboarding persisted atoms so codex-web opens to
+  the app home screen instead of the Desktop onboarding wizard.
+- served HTML removes the malformed duplicate style residue that the historical
+  webview style patch can leave in `index.html`.
+
+Browser verification should confirm the page renders the home composer, reports
+the App version, and has no console errors:
+
+```bash
+bash "$HOME/.codex/skills/playwright/scripts/playwright_cli.sh" -s=codexweb-final reload
+sleep 10
+bash "$HOME/.codex/skills/playwright/scripts/playwright_cli.sh" -s=codexweb-final snapshot
+bash "$HOME/.codex/skills/playwright/scripts/playwright_cli.sh" -s=codexweb-final console error
 ```
 
 ## Security

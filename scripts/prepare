@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-TEMP_DIR="$(mktemp -d)"
+APPCAST_URL="${CODEX_APPCAST_URL:-https://persistent.oaistatic.com/codex-app-prod/appcast.xml}"
+CACHE_DIR="${CODEX_APP_ZIP_CACHE_DIR:-.cache/codex-app-zips}"
 
-APP_VERSION="26.513.20950"
-curl -o "$TEMP_DIR/file.zip" "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-$APP_VERSION.zip"
+if [[ -z "${APP_VERSION:-}" ]]; then
+  APP_VERSION="$(
+    curl -fsSL "$APPCAST_URL" |
+      sed -n 's#.*<sparkle:shortVersionString>\([^<]*\)</sparkle:shortVersionString>.*#\1#p' |
+      head -1
+  )"
+fi
 
-HOSTED_CODEX_APP_ZIP="$TEMP_DIR/file.zip" bash ./scripts/prepare_asar
+if [[ -z "$APP_VERSION" ]]; then
+  echo "Unable to resolve Codex App version from $APPCAST_URL" >&2
+  exit 1
+fi
 
-rm -rf "$TEMP_DIR"
+mkdir -p "$CACHE_DIR"
+HOSTED_CODEX_APP_ZIP="$CACHE_DIR/Codex-darwin-arm64-$APP_VERSION.zip"
+if [[ ! -s "$HOSTED_CODEX_APP_ZIP" ]]; then
+  curl -fL -o "$HOSTED_CODEX_APP_ZIP" \
+    "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-$APP_VERSION.zip"
+fi
+
+HOSTED_CODEX_APP_ZIP="$HOSTED_CODEX_APP_ZIP" bash ./scripts/prepare_asar

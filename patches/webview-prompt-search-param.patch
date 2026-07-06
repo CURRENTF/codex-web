@@ -1,5 +1,5 @@
---- a/webview/assets/app-main-Dsg36Y4q.js
-+++ b/webview/assets/app-main-Dsg36Y4q.js
+--- a/webview/assets/app-main-Dldh3K_n.js
++++ b/webview/assets/app-main-Dldh3K_n.js
 @@ -711,6 +711,7 @@
    c as ri,
    d as ii,
@@ -35,8 +35,8 @@
                          onLocalConversationCreated: N,
                          showWorkspaceDropdownInFooter: !1,
                          hideRunLocationDropdownOverride: C.kind !== `git`,
---- a/webview/assets/composer-CL8HPtlL.js
-+++ b/webview/assets/composer-CL8HPtlL.js
+--- a/webview/assets/composer-DlMDPaCL.js
++++ b/webview/assets/composer-DlMDPaCL.js
 @@ -67407,6 +67407,7 @@
    showPlanKeywordSuggestion: f,
    composerModeAvailability: m,

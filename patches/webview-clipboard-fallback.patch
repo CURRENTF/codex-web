@@ -1,6 +1,6 @@
---- a/webview/assets/copy-to-clipboard-HROK9-1F.js
-+++ b/webview/assets/copy-to-clipboard-HROK9-1F.js
-@@ -1,17 +1,64 @@
+--- a/webview/assets/copy-to-clipboard-C9EKP1fU.js
++++ b/webview/assets/copy-to-clipboard-C9EKP1fU.js
+@@ -1,43 +1,87 @@
 +function n(e, t) {
 +  let n = t ?? document,
 +    r = n.createElement(`textarea`),
@@ -43,7 +43,7 @@
 -  let { navigator: n } = t?.target?.ownerDocument?.defaultView ?? window;
 -  return new Promise((t, r) => {
 -    if (!n?.clipboard) {
--      r();
+-      r(Error(`Clipboard API unavailable`));
 +  let r = t?.target?.ownerDocument?.defaultView ?? window,
 +    { navigator: a, document: o } = r,
 +    l = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
@@ -53,7 +53,7 @@
        return;
      }
 +    let d = () => {
-+      n(l, o) ? s(!0) : c();
++      n(l, o) ? s(!0) : c(Error(`Failed to copy to clipboard`));
 +    };
 +    if (!r.isSecureContext || !a?.clipboard) {
 +      d();
@@ -64,6 +64,7 @@
          typeof e != `string` &&
 -        `write` in n.clipboard &&
 +        `write` in a.clipboard &&
+         typeof ClipboardItem < `u` &&
          `supports` in ClipboardItem
        ) {
 -        let i = new ClipboardItem(
@@ -71,41 +72,31 @@
            Object.fromEntries(
              Object.entries(e).map(([e, t]) => [
                e,
-@@ -19,23 +66,10 @@
+               typeof t == `string` ? new Blob([t], { type: e }) : t,
+@@ -20,22 +64,9 @@
              ]),
            ),
          );
 -        n.clipboard.write([i]).then(
 -          () => t(!0),
 -          () => {
--            r();
+-            r(Error(`Failed to copy to clipboard`));
 -          },
 -        );
--      } else {
++        a.clipboard.write([n]).then(() => s(!0), d);
+       } else {
 -        let i = typeof e == `string` ? e : (e[`text/plain`] ?? ``);
 -        n.clipboard.writeText(i).then(
 -          () => t(!0),
 -          () => {
--            r();
+-            r(Error(`Failed to copy to clipboard`));
 -          },
 -        );
--      }
-+        a.clipboard.write([n]).then(() => s(!0), d);
-+      } else a.clipboard.writeText(l).then(() => s(!0), d);
++        a.clipboard.writeText(l).then(() => s(!0), d);
+       }
      } catch {
--      r();
+-      r(Error(`Failed to copy to clipboard`));
 +      d();
      }
    });
  }
---- a/webview/assets/local-conversation-thread-Dki9vHa8.js
-+++ b/webview/assets/local-conversation-thread-Dki9vHa8.js
-@@ -19405 +19405 @@
--        navigator.clipboard.writeText(e).then(() => {
-+        Jo(e).then(() => {
-@@ -19534 +19534 @@
--                navigator.clipboard.writeText(D);
-+                Jo(D);
-@@ -19583 +19583 @@
--        navigator.clipboard.writeText(a);
-+        Jo(a);

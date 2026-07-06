@@ -218,6 +218,12 @@ function createIpcMainStub(): {
   ): Promise<unknown> => {
     const handler = handlers.get(channel);
     if (!handler) {
+      if (channel === "codex_desktop:message-from-view") {
+        const event = createIpcMainEvent(sender);
+        emitter.emit(channel, event, ...args);
+        return event.returnValue;
+      }
+
       throw new Error(`[electron-main-stub] No ipcMain.handle for ${channel}`);
     }
     const event = createIpcMainEvent(sender);
@@ -251,6 +257,8 @@ function createIpcMainStub(): {
 }
 
 let appReady = false;
+let sentryProtocolRegistered = false;
+const commandLineSwitches = new Map<string, string>();
 
 const appBase = {
   ...createEmitterStub("app"),
@@ -295,7 +303,7 @@ const appBase = {
   },
   isReady(): boolean {
     log("app.isReady", []);
-    return appReady;
+    return appReady && sentryProtocolRegistered;
   },
   whenReady(): Promise<void> {
     log("app.whenReady", []);
@@ -305,6 +313,22 @@ const appBase = {
   commandLine: {
     appendSwitch(name: string, value?: string): void {
       log("app.commandLine.appendSwitch", [name, value]);
+      commandLineSwitches.set(name, value ?? "");
+    },
+    appendArgument(value: string): void {
+      log("app.commandLine.appendArgument", [value]);
+    },
+    getSwitchValue(name: string): string {
+      log("app.commandLine.getSwitchValue", [name]);
+      return commandLineSwitches.get(name) ?? "";
+    },
+    hasSwitch(name: string): boolean {
+      log("app.commandLine.hasSwitch", [name]);
+      return commandLineSwitches.has(name);
+    },
+    removeSwitch(name: string): void {
+      log("app.commandLine.removeSwitch", [name]);
+      commandLineSwitches.delete(name);
     },
   },
   on(event: string, listener: (...args: unknown[]) => void): unknown {
@@ -769,6 +793,19 @@ const screen = {
 const protocol = {
   registerSchemesAsPrivileged(...args: unknown[]): void {
     log("protocol.registerSchemesAsPrivileged", args);
+    const [schemes] = args;
+    if (
+      Array.isArray(schemes) &&
+      schemes.some(
+        (scheme) =>
+          typeof scheme === "object" &&
+          scheme !== null &&
+          "scheme" in scheme &&
+          scheme.scheme === "sentry-ipc",
+      )
+    ) {
+      sentryProtocolRegistered = true;
+    }
   },
   handle(...args: unknown[]): void {
     log("protocol.handle", args);
@@ -860,9 +897,20 @@ const utilityProcess = {
   fork: undefined,
 };
 const webContents = {
-  fromId(id: number): undefined {
+  fromId(id: number): Record<string, unknown> | undefined {
     log("webContents.fromId", [id]);
-    return undefined;
+    return BrowserWindow.getAllWindows().find(
+      (window) =>
+        (window.webContents as { id?: unknown } | undefined)?.id === id,
+    )?.webContents;
+  },
+  getAllWebContents(): Array<Record<string, unknown>> {
+    log("webContents.getAllWebContents", []);
+    return BrowserWindow.getAllWindows().map((window) => window.webContents);
+  },
+  getFocusedWebContents(): Record<string, unknown> | undefined {
+    log("webContents.getFocusedWebContents", []);
+    return BrowserWindow.getFocusedWindow()?.webContents;
   },
 };
 class MessageChannelMain {
