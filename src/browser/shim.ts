@@ -162,7 +162,6 @@ type FloatingStatusState = {
 
 const STATUS_POLL_INTERVAL_MS = 5_000;
 const STATUS_POLL_TIMEOUT_MS = 3_000;
-const STATUS_PANEL_STORAGE_KEY = "codex-web:floating-status-expanded";
 
 const floatingStatusState: FloatingStatusState = {
   bridge: "connecting",
@@ -374,19 +373,29 @@ function ensureFloatingStatusPanel(): void {
   style.textContent = `
 .codex-web-floating-status {
   position: fixed;
-  right: max(14px, env(safe-area-inset-right));
-  bottom: max(14px, env(safe-area-inset-bottom));
+  left: 50%;
+  top: 50%;
   z-index: 2147483647;
-  width: min(320px, calc(100vw - 28px));
+  width: 26px;
+  height: 26px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
+  border-radius: 999px;
   background: color-mix(in srgb, Canvas 92%, transparent);
   color: CanvasText;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
   font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
+  overflow: hidden;
+  transform: translate(-50%, -50%);
+  transition: width 140ms ease, height 140ms ease, border-radius 140ms ease;
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
+}
+
+.codex-web-floating-status[data-expanded="true"] {
+  width: min(320px, calc(100vw - 28px));
+  height: auto;
+  border-radius: 8px;
 }
 
 .codex-web-floating-status[data-tone="good"] {
@@ -403,17 +412,18 @@ function ensureFloatingStatusPanel(): void {
 
 .codex-web-status-summary {
   display: flex;
-  min-height: 34px;
+  min-height: 24px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  cursor: default;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  cursor: pointer;
   user-select: none;
 }
 
 .codex-web-status-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--codex-web-status-dot, #d97706);
@@ -421,9 +431,11 @@ function ensureFloatingStatusPanel(): void {
 }
 
 .codex-web-status-summary-text {
-  min-width: 0;
+  position: absolute;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip: rect(0, 0, 0, 0);
   white-space: nowrap;
 }
 
@@ -436,8 +448,6 @@ function ensureFloatingStatusPanel(): void {
   transition: max-height 140ms ease, opacity 140ms ease, border-top-width 140ms ease;
 }
 
-.codex-web-floating-status:hover .codex-web-status-details,
-.codex-web-floating-status:focus-within .codex-web-status-details,
 .codex-web-floating-status[data-expanded="true"] .codex-web-status-details {
   max-height: 160px;
   border-top-width: 1px;
@@ -465,9 +475,7 @@ function ensureFloatingStatusPanel(): void {
 }
 
 @media (max-width: 640px) {
-  .codex-web-floating-status {
-    right: 10px;
-    bottom: max(10px, env(safe-area-inset-bottom));
+  .codex-web-floating-status[data-expanded="true"] {
     width: min(300px, calc(100vw - 20px));
   }
 }
@@ -476,8 +484,7 @@ function ensureFloatingStatusPanel(): void {
 
   const root = document.createElement("div");
   root.className = "codex-web-floating-status";
-  root.dataset.expanded =
-    localStorage.getItem(STATUS_PANEL_STORAGE_KEY) === "1" ? "true" : "false";
+  root.dataset.expanded = "false";
   root.role = "status";
   root.tabIndex = 0;
 
@@ -504,10 +511,6 @@ function ensureFloatingStatusPanel(): void {
 
   root.addEventListener("click", () => {
     root.dataset.expanded = root.dataset.expanded === "true" ? "false" : "true";
-    localStorage.setItem(
-      STATUS_PANEL_STORAGE_KEY,
-      root.dataset.expanded === "true" ? "1" : "0",
-    );
   });
 
   floatingStatusRoot = root;
