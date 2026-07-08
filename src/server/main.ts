@@ -47,6 +47,10 @@ type MainAssetParams = {
   hash: string;
 };
 
+type HeaderWritableResponse = {
+  setHeader: (name: string, value: number | string | readonly string[]) => void;
+};
+
 type RendererToMainMessage =
   | {
       type: "ipc-renderer-invoke";
@@ -190,6 +194,8 @@ const defaultScheduledFakeUserPromptDelayMs = 60 * 60 * 1_000;
 const scheduledFakeUserPromptRetryAfterMs = 30_000;
 const scheduledFakeUserPromptNoRendererRetryMs = 15_000;
 const maxScheduledFakeUserPromptTimerDelayMs = 2_147_483_647;
+const immutableBrowserAssetCacheControl = "public, max-age=31536000, immutable";
+const shortBrowserAssetCacheControl = "public, max-age=3600";
 
 function printUsage(): void {
   console.log(
@@ -668,6 +674,129 @@ function addBrowserAssetCacheBusters(html: string): string {
   );
 }
 
+function setWebviewStaticCacheHeaders(
+  response: HeaderWritableResponse,
+  filePath: string,
+): void {
+  const normalizedPath = filePath.split(path.sep).join("/");
+  if (normalizedPath.includes("/assets/")) {
+    response.setHeader("Cache-Control", immutableBrowserAssetCacheControl);
+    return;
+  }
+
+  if (
+    normalizedPath.endsWith("/favicon.svg") ||
+    normalizedPath.endsWith("/manifest.json")
+  ) {
+    response.setHeader("Cache-Control", shortBrowserAssetCacheControl);
+  }
+}
+
+function buildCodexWebServiceWorkerScript(): string {
+  const assetCacheName = `codex-web-assets-${browserAssetVersion}`;
+  const shellCacheName = `codex-web-shell-${browserAssetVersion}`;
+
+  return `const ASSET_CACHE_NAME = ${JSON.stringify(assetCacheName)};
+const SHELL_CACHE_NAME = ${JSON.stringify(shellCacheName)};
+const CACHE_NAMES = new Set([ASSET_CACHE_NAME, SHELL_CACHE_NAME]);
+
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys
+      .filter((key) => key.startsWith("codex-web-") && !CACHE_NAMES.has(key))
+      .map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
+});
+
+function shouldHandle(requestUrl, request) {
+  if (request.method !== "GET" || requestUrl.origin !== location.origin) {
+    return false;
+  }
+  if (
+    requestUrl.pathname.startsWith("/__backend/") ||
+    requestUrl.pathname.startsWith("/__auth/") ||
+    requestUrl.pathname.startsWith("/@fs/")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isCacheableAsset(requestUrl) {
+  return requestUrl.pathname.startsWith("/assets/");
+}
+
+function isShellRequest(requestUrl, request) {
+  return (
+    request.mode === "navigate" ||
+    requestUrl.pathname === "/" ||
+    requestUrl.pathname === "/index.html" ||
+    requestUrl.pathname.startsWith("/thread/")
+  );
+}
+
+function canCacheResponse(response) {
+  return response && response.ok && !response.redirected;
+}
+
+async function cacheFirst(request) {
+  const cache = await caches.open(ASSET_CACHE_NAME);
+  const cached = await cache.match(request);
+  if (cached) {
+    return cached;
+  }
+
+  const response = await fetch(request);
+  if (canCacheResponse(response)) {
+    await cache.put(request, response.clone());
+  }
+  return response;
+}
+
+async function networkFirstShell(request) {
+  const cache = await caches.open(SHELL_CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (canCacheResponse(response)) {
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch (error) {
+    const cached =
+      (await cache.match(request)) ||
+      (await cache.match("/")) ||
+      (await cache.match("/index.html"));
+    if (cached) {
+      return cached;
+    }
+    throw error;
+  }
+}
+
+self.addEventListener("fetch", (event) => {
+  const requestUrl = new URL(event.request.url);
+  if (!shouldHandle(requestUrl, event.request)) {
+    return;
+  }
+
+  if (isCacheableAsset(requestUrl)) {
+    event.respondWith(cacheFirst(event.request));
+    return;
+  }
+
+  if (isShellRequest(requestUrl, event.request)) {
+    event.respondWith(networkFirstShell(event.request));
+  }
+});
+`;
+}
+
 function redirectStatsigNetworkToLocalBootstrap(source: string): {
   source: string;
   redirected: boolean;
@@ -781,7 +910,7 @@ async function sendPatchedMainAsset(
   const assetPath = path.join(webviewRoot, "assets", `${prefix}-${hash}.js`);
   return reply
     .header("Content-Type", "text/javascript; charset=utf-8")
-    .header("Cache-Control", "no-cache")
+    .header("Cache-Control", immutableBrowserAssetCacheControl)
     .send(await getPatchedMainAsset(assetPath));
 }
 
@@ -793,6 +922,18 @@ async function sendWebviewIndexHtml(
     .header("Content-Type", "text/html; charset=utf-8")
     .header("Cache-Control", "no-cache")
     .send(await getWebviewIndexHtml(webviewRoot));
+}
+
+async function sendShortCachedWebviewFile(
+  reply: FastifyReply,
+  webviewRoot: string,
+  fileName: string,
+  contentType: string,
+): Promise<FastifyReply> {
+  return reply
+    .header("Content-Type", contentType)
+    .header("Cache-Control", shortBrowserAssetCacheControl)
+    .send(await fs.readFile(path.join(webviewRoot, fileName)));
 }
 
 async function getWorkspaceDirectoryEntries({
@@ -1035,6 +1176,28 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     return reply.code(401).send({ error: "Unauthorized" });
   });
 
+  app.get("/__backend/status", async (_request, reply) => {
+    return reply.header("Cache-Control", "no-store").send({
+      ok: true,
+      nowMs: Date.now(),
+      uptimeMs: Math.round(process.uptime() * 1_000),
+      websocketClients: sockets.size,
+      ipcHandlersReady: Boolean(
+        bridgeState.handleRendererInvoke || bridgeState.handleRendererSend,
+      ),
+      browserAssetVersion,
+      pid: process.pid,
+    });
+  });
+
+  app.get("/codex-web-sw.js", async (_request, reply) => {
+    return reply
+      .header("Content-Type", "text/javascript; charset=utf-8")
+      .header("Cache-Control", "no-cache")
+      .header("Service-Worker-Allowed", "/")
+      .send(buildCodexWebServiceWorkerScript());
+  });
+
   app.get("/__backend/scheduled-fake-user-prompts", async (_request, reply) => {
     return reply.send({
       activeConversationId: lastActiveLocalConversationId,
@@ -1149,6 +1312,24 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     return sendWebviewIndexHtml(reply, webviewRoot);
   });
 
+  app.get("/favicon.svg", async (_request, reply) => {
+    return sendShortCachedWebviewFile(
+      reply,
+      webviewRoot,
+      "favicon.svg",
+      "image/svg+xml; charset=utf-8",
+    );
+  });
+
+  app.get("/manifest.json", async (_request, reply) => {
+    return sendShortCachedWebviewFile(
+      reply,
+      webviewRoot,
+      "manifest.json",
+      "application/manifest+json; charset=utf-8",
+    );
+  });
+
   app.get<{ Params: MainAssetParams }>(
     "/assets/index-:hash.js",
     async (request, reply) => {
@@ -1176,6 +1357,9 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   await app.register(fastifyStatic, {
     root: webviewRoot,
     prefix: "/",
+    immutable: true,
+    maxAge: "1y",
+    setHeaders: setWebviewStaticCacheHeaders,
   });
 
   app.setNotFoundHandler((request, reply) => {

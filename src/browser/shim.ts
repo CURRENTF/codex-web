@@ -127,6 +127,61 @@ type PendingRequest<T> = {
   socket: WebSocket | null;
 };
 
+type BridgeConnectionState =
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error";
+
+type HttpConnectionState =
+  | "checking"
+  | "reachable"
+  | "unreachable"
+  | "unauthorized"
+  | "offline";
+
+type CodexWebStatusResponse = {
+  ok?: boolean;
+  nowMs?: number;
+  uptimeMs?: number;
+  websocketClients?: number;
+  ipcHandlersReady?: boolean;
+  browserAssetVersion?: string;
+};
+
+type FloatingStatusState = {
+  bridge: BridgeConnectionState;
+  http: HttpConnectionState;
+  webOnline: boolean;
+  pageVisible: boolean;
+  lastCheckedAtMs: number | null;
+  latencyMs: number | null;
+  websocketClients: number | null;
+  ipcHandlersReady: boolean | null;
+};
+
+const STATUS_POLL_INTERVAL_MS = 5_000;
+const STATUS_POLL_TIMEOUT_MS = 3_000;
+const STATUS_PANEL_STORAGE_KEY = "codex-web:floating-status-expanded";
+
+const floatingStatusState: FloatingStatusState = {
+  bridge: "connecting",
+  http: "checking",
+  webOnline: navigator.onLine,
+  pageVisible: document.visibilityState !== "hidden",
+  lastCheckedAtMs: null,
+  latencyMs: null,
+  websocketClients: null,
+  ipcHandlersReady: null,
+};
+
+let floatingStatusRoot: HTMLDivElement | null = null;
+let floatingStatusSummary: HTMLSpanElement | null = null;
+let floatingStatusServerValue: HTMLSpanElement | null = null;
+let floatingStatusHttpValue: HTMLSpanElement | null = null;
+let floatingStatusWebValue: HTMLSpanElement | null = null;
+let floatingStatusDetailValue: HTMLSpanElement | null = null;
+
 declare global {
   interface Window {
     __ELECTRON_SHIM__?: ElectronShimState;
@@ -164,6 +219,441 @@ export function emitRendererEvent(channel: string, args: unknown[]): void {
   for (const listener of listeners) {
     listener(event, ...args);
   }
+}
+
+function bridgeConnectionLabel(state: BridgeConnectionState): string {
+  switch (state) {
+    case "connected":
+      return "connected";
+    case "connecting":
+      return "connecting";
+    case "error":
+      return "error";
+    case "disconnected":
+      return "disconnected";
+  }
+}
+
+function httpConnectionLabel(state: HttpConnectionState): string {
+  switch (state) {
+    case "reachable":
+      return "reachable";
+    case "checking":
+      return "checking";
+    case "unauthorized":
+      return "login required";
+    case "offline":
+      return "offline";
+    case "unreachable":
+      return "unreachable";
+  }
+}
+
+function formatLastChecked(timestampMs: number | null): string {
+  if (timestampMs === null) {
+    return "not checked yet";
+  }
+
+  const secondsAgo = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
+  if (secondsAgo < 3) {
+    return "just now";
+  }
+  if (secondsAgo < 60) {
+    return `${secondsAgo}s ago`;
+  }
+  return `${Math.round(secondsAgo / 60)}m ago`;
+}
+
+function currentFloatingStatusTone(): "good" | "warn" | "bad" {
+  if (
+    !floatingStatusState.webOnline ||
+    floatingStatusState.http === "offline"
+  ) {
+    return "bad";
+  }
+
+  if (
+    floatingStatusState.bridge === "connected" &&
+    floatingStatusState.http === "reachable"
+  ) {
+    return "good";
+  }
+
+  if (
+    floatingStatusState.bridge === "connecting" ||
+    floatingStatusState.http === "checking"
+  ) {
+    return "warn";
+  }
+
+  return "bad";
+}
+
+function updateFloatingStatusPanel(): void {
+  ensureFloatingStatusPanel();
+  if (!floatingStatusRoot) {
+    return;
+  }
+
+  const serverLabel = bridgeConnectionLabel(floatingStatusState.bridge);
+  const webLabel = floatingStatusState.webOnline ? "online" : "offline";
+  const httpLabel = httpConnectionLabel(floatingStatusState.http);
+  floatingStatusRoot.dataset.tone = currentFloatingStatusTone();
+
+  if (floatingStatusSummary) {
+    floatingStatusSummary.textContent = `Server ${serverLabel} · Web ${webLabel}`;
+  }
+  if (floatingStatusServerValue) {
+    floatingStatusServerValue.textContent = serverLabel;
+  }
+  if (floatingStatusHttpValue) {
+    floatingStatusHttpValue.textContent =
+      floatingStatusState.latencyMs !== null &&
+      floatingStatusState.http === "reachable"
+        ? `${httpLabel} (${floatingStatusState.latencyMs} ms)`
+        : httpLabel;
+  }
+  if (floatingStatusWebValue) {
+    floatingStatusWebValue.textContent = floatingStatusState.webOnline
+      ? "online"
+      : "offline";
+  }
+  if (floatingStatusDetailValue) {
+    const socketText =
+      floatingStatusState.websocketClients === null
+        ? "sockets unknown"
+        : `${floatingStatusState.websocketClients} socket${
+            floatingStatusState.websocketClients === 1 ? "" : "s"
+          }`;
+    const ipcText =
+      floatingStatusState.ipcHandlersReady === null
+        ? "IPC unknown"
+        : floatingStatusState.ipcHandlersReady
+          ? "IPC ready"
+          : "IPC starting";
+    floatingStatusDetailValue.textContent = `${ipcText} · ${socketText} · checked ${formatLastChecked(
+      floatingStatusState.lastCheckedAtMs,
+    )}`;
+  }
+
+  floatingStatusRoot.setAttribute(
+    "aria-label",
+    `Codex Web status: server ${serverLabel}, HTTP ${httpLabel}, web ${webLabel}`,
+  );
+}
+
+function setFloatingStatusState(patch: Partial<FloatingStatusState>): void {
+  Object.assign(floatingStatusState, patch);
+  updateFloatingStatusPanel();
+}
+
+function createFloatingStatusRow(label: string): {
+  row: HTMLDivElement;
+  value: HTMLSpanElement;
+} {
+  const row = document.createElement("div");
+  row.className = "codex-web-status-row";
+
+  const labelElement = document.createElement("span");
+  labelElement.className = "codex-web-status-label";
+  labelElement.textContent = label;
+
+  const value = document.createElement("span");
+  value.className = "codex-web-status-value";
+
+  row.append(labelElement, value);
+  return { row, value };
+}
+
+function ensureFloatingStatusPanel(): void {
+  if (floatingStatusRoot || !document.body) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.textContent = `
+.codex-web-floating-status {
+  position: fixed;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 2147483647;
+  width: min(320px, calc(100vw - 28px));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: color-mix(in srgb, Canvas 92%, transparent);
+  color: CanvasText;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+  font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.codex-web-floating-status[data-tone="good"] {
+  --codex-web-status-dot: #16a34a;
+}
+
+.codex-web-floating-status[data-tone="warn"] {
+  --codex-web-status-dot: #d97706;
+}
+
+.codex-web-floating-status[data-tone="bad"] {
+  --codex-web-status-dot: #dc2626;
+}
+
+.codex-web-status-summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: default;
+  user-select: none;
+}
+
+.codex-web-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--codex-web-status-dot, #d97706);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-web-status-dot, #d97706) 20%, transparent);
+}
+
+.codex-web-status-summary-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-web-status-details {
+  display: grid;
+  max-height: 0;
+  overflow: hidden;
+  border-top: 0 solid transparent;
+  opacity: 0;
+  transition: max-height 140ms ease, opacity 140ms ease, border-top-width 140ms ease;
+}
+
+.codex-web-floating-status:hover .codex-web-status-details,
+.codex-web-floating-status:focus-within .codex-web-status-details,
+.codex-web-floating-status[data-expanded="true"] .codex-web-status-details {
+  max-height: 160px;
+  border-top-width: 1px;
+  border-top-color: rgba(127, 127, 127, 0.25);
+  opacity: 1;
+}
+
+.codex-web-status-row {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 12px;
+  padding: 7px 10px;
+}
+
+.codex-web-status-label {
+  color: color-mix(in srgb, CanvasText 58%, transparent);
+}
+
+.codex-web-status-value {
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .codex-web-floating-status {
+    right: 10px;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    width: min(300px, calc(100vw - 20px));
+  }
+}
+`;
+  document.head.append(style);
+
+  const root = document.createElement("div");
+  root.className = "codex-web-floating-status";
+  root.dataset.expanded =
+    localStorage.getItem(STATUS_PANEL_STORAGE_KEY) === "1" ? "true" : "false";
+  root.role = "status";
+  root.tabIndex = 0;
+
+  const summary = document.createElement("div");
+  summary.className = "codex-web-status-summary";
+  const dot = document.createElement("span");
+  dot.className = "codex-web-status-dot";
+  floatingStatusSummary = document.createElement("span");
+  floatingStatusSummary.className = "codex-web-status-summary-text";
+  summary.append(dot, floatingStatusSummary);
+
+  const details = document.createElement("div");
+  details.className = "codex-web-status-details";
+  const serverRow = createFloatingStatusRow("Server");
+  const httpRow = createFloatingStatusRow("HTTP");
+  const webRow = createFloatingStatusRow("Web");
+  const detailRow = createFloatingStatusRow("Detail");
+  floatingStatusServerValue = serverRow.value;
+  floatingStatusHttpValue = httpRow.value;
+  floatingStatusWebValue = webRow.value;
+  floatingStatusDetailValue = detailRow.value;
+  details.append(serverRow.row, httpRow.row, webRow.row, detailRow.row);
+  root.append(summary, details);
+
+  root.addEventListener("click", () => {
+    root.dataset.expanded = root.dataset.expanded === "true" ? "false" : "true";
+    localStorage.setItem(
+      STATUS_PANEL_STORAGE_KEY,
+      root.dataset.expanded === "true" ? "1" : "0",
+    );
+  });
+
+  floatingStatusRoot = root;
+  document.body.append(root);
+}
+
+function installFloatingStatusPanel(): void {
+  if (document.body) {
+    ensureFloatingStatusPanel();
+    updateFloatingStatusPanel();
+    return;
+  }
+
+  window.addEventListener(
+    "DOMContentLoaded",
+    () => {
+      ensureFloatingStatusPanel();
+      updateFloatingStatusPanel();
+    },
+    { once: true },
+  );
+}
+
+async function pollCodexWebStatus(): Promise<void> {
+  if (!navigator.onLine) {
+    setFloatingStatusState({
+      http: "offline",
+      webOnline: false,
+      lastCheckedAtMs: Date.now(),
+      latencyMs: null,
+    });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, STATUS_POLL_TIMEOUT_MS);
+  const startedAt = performance.now();
+
+  try {
+    const response = await fetch("/__backend/status", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+    if (response.status === 401) {
+      setFloatingStatusState({
+        http: "unauthorized",
+        webOnline: navigator.onLine,
+        lastCheckedAtMs: Date.now(),
+        latencyMs,
+        ipcHandlersReady: null,
+        websocketClients: null,
+      });
+      return;
+    }
+
+    if (!response.ok) {
+      setFloatingStatusState({
+        http: "unreachable",
+        webOnline: navigator.onLine,
+        lastCheckedAtMs: Date.now(),
+        latencyMs,
+      });
+      return;
+    }
+
+    const status = (await response.json()) as CodexWebStatusResponse;
+    setFloatingStatusState({
+      http: status.ok ? "reachable" : "unreachable",
+      webOnline: navigator.onLine,
+      pageVisible: document.visibilityState !== "hidden",
+      lastCheckedAtMs: Date.now(),
+      latencyMs,
+      websocketClients:
+        typeof status.websocketClients === "number"
+          ? status.websocketClients
+          : null,
+      ipcHandlersReady:
+        typeof status.ipcHandlersReady === "boolean"
+          ? status.ipcHandlersReady
+          : null,
+    });
+  } catch {
+    setFloatingStatusState({
+      http: navigator.onLine ? "unreachable" : "offline",
+      webOnline: navigator.onLine,
+      lastCheckedAtMs: Date.now(),
+      latencyMs: null,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function startCodexWebStatusPolling(): void {
+  installFloatingStatusPanel();
+  void pollCodexWebStatus();
+
+  window.setInterval(() => {
+    void pollCodexWebStatus();
+  }, STATUS_POLL_INTERVAL_MS);
+
+  window.addEventListener("online", () => {
+    setFloatingStatusState({ webOnline: true, http: "checking" });
+    void pollCodexWebStatus();
+  });
+  window.addEventListener("offline", () => {
+    setFloatingStatusState({
+      bridge: "disconnected",
+      http: "offline",
+      webOnline: false,
+      latencyMs: null,
+    });
+  });
+  document.addEventListener("visibilitychange", () => {
+    setFloatingStatusState({
+      pageVisible: document.visibilityState !== "hidden",
+    });
+    if (document.visibilityState !== "hidden") {
+      void pollCodexWebStatus();
+    }
+  });
+}
+
+function registerCodexWebServiceWorker(): void {
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) {
+    return;
+  }
+
+  window.addEventListener(
+    "load",
+    () => {
+      navigator.serviceWorker
+        .register("/codex-web-sw.js", { scope: "/" })
+        .catch((error: unknown) => {
+          console.warn("[codex-web] service worker registration failed", error);
+        });
+    },
+    { once: true },
+  );
 }
 
 function getScheduledFakeUserPrompts(): ScheduledFakeUserPrompt[] {
@@ -347,11 +837,13 @@ function ensureSocket(): void {
     return;
   }
 
+  setFloatingStatusState({ bridge: "connecting" });
   const nextSocket = new WebSocket(
     `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/__backend/ipc`,
   );
   socket = nextSocket;
   nextSocket.addEventListener("open", () => {
+    setFloatingStatusState({ bridge: "connected" });
     flushOutboundQueue();
   });
   nextSocket.addEventListener("message", (event) => {
@@ -373,9 +865,11 @@ function ensureSocket(): void {
     if (socket === nextSocket) {
       socket = null;
     }
+    setFloatingStatusState({ bridge: "disconnected" });
     scheduleReconnect();
   });
   nextSocket.addEventListener("error", () => {
+    setFloatingStatusState({ bridge: "error" });
     scheduleReconnect();
   });
 }
@@ -676,6 +1170,8 @@ export const ipcRenderer = {
 };
 
 ensureSocket();
+startCodexWebStatusPolling();
+registerCodexWebServiceWorker();
 
 export const contextBridge = {
   exposeInMainWorld(_key: string, _api: unknown): void {
