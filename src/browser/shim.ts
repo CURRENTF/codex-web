@@ -374,7 +374,7 @@ function ensureFloatingStatusPanel(): void {
 .codex-web-floating-status {
   position: fixed;
   left: 50%;
-  top: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
   z-index: 2147483647;
   width: 26px;
   height: 26px;
@@ -386,7 +386,7 @@ function ensureFloatingStatusPanel(): void {
   font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
   overflow: hidden;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   transition: width 140ms ease, height 140ms ease, border-radius 140ms ease;
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
